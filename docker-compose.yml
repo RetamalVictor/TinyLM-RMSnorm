@@ -1,0 +1,26 @@
+services:
+  nanofalcon:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: nanofalcon:latest
+    gpus: all
+    shm_size: "8g"
+    environment:
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+      HF_HOME: "/workspace/.cache/huggingface"
+      TOKENIZERS_PARALLELISM: "false"
+    volumes:
+      - hf-cache:/workspace/.cache/huggingface
+      - outputs:/workspace/app/out
+    working_dir: /workspace/app
+    command: >
+      bash -lc "python data/prepare_tinystories.py &&
+                python setup_cuda.py build_ext --inplace &&
+                pytest -q &&
+                python train.py --data tinystories --steps 2000 --batch_size 16 --seq_len 256 --dim 384 --n_layers 6 --n_heads 6 --lr 3e-4 --compile &&
+                python infer.py --ckpt out/best.pt --prompt 'Once upon a time in Abu Dhabi' --max_new_tokens 80"
+volumes:
+  hf-cache:
+  outputs:
