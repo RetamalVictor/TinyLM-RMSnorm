@@ -143,47 +143,47 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #include <cuda_fp16.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <type_traits>
 #include <cmath>
 
-// Utility: type traits
+// Conversions
+__device__ inline float to_float(float x) { return x; }
+__device__ inline float to_float(half x)  { return __half2float(x); }
 
 template<typename T>
-struct Vec { using scalar = T; };
+__device__ inline T from_float(float x);
 
 template<>
-struct Vec<half> { using scalar = half; };
+__device__ inline float from_float<float>(float x) { return x; }
 
-// Load/store helpers
-__device__ inline float to_float(float x) { return x; }
-__device__ inline float to_float(half x) { return __half2float(x); }
-__device__ inline half  to_half(float x) { return __float2half(x); }
+template<>
+__device__ inline half from_float<half>(float x) { return __float2half(x); }
 
-// Block reduction (sum)
+// Block reduction (sum) that returns the reduced value in lane 0 of warp 0
+// (Other threads will have undefined 'val'; we'll broadcast via shared mem.)
 template<typename T>
 __inline__ __device__ T blockReduceSum(T val) {
   __shared__ T shared[32];
   int lane = threadIdx.x & 31;
   int wid  = threadIdx.x >> 5;
-
   // warp reduce
   #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1)
     val += __shfl_down_sync(0xffffffff, val, offset);
-
+  // write per-warp sum
   if (lane == 0) shared[wid] = val;
   __syncthreads();
-
-  val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
+  // first warp loads per-warp sums
+  val = (lane < (blockDim.x + 31) / 32) ? shared[lane] : 0;
   if (wid == 0) {
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
       val += __shfl_down_sync(0xffffffff, val, offset);
   }
-  return val;
+  return val; // valid in warp 0, lane 0
 }
 
 // Forward kernel: per-row RMS + scale + weight
-
 template<typename scalar_t>
 __global__ void rmsnorm_fwd_kernel(const scalar_t* __restrict__ x,
                                    const scalar_t* __restrict__ w,
@@ -202,20 +202,25 @@ __global__ void rmsnorm_fwd_kernel(const scalar_t* __restrict__ x,
     float xi = to_float(x_row[i]);
     sumsq += xi * xi;
   }
-  sumsq = blockReduceSum<float>(sumsq);
+  float reduced = blockReduceSum<float>(sumsq);
 
-  float inv_rms = rsqrtf(sumsq / hidden + eps);
-  if (tid == 0) inv_rms_out[row] = inv_rms;
+  __shared__ float s_inv_rms;
+  if (tid == 0) {
+    s_inv_rms = rsqrtf(reduced / hidden + eps);
+    inv_rms_out[row] = s_inv_rms;
+  }
+  __syncthreads();
+  float inv_rms = s_inv_rms; // broadcast
 
   for (int i = tid; i < hidden; i += stride) {
     float xi = to_float(x_row[i]);
     float wi = to_float(w[i]);
     float yi = (xi * inv_rms) * wi;
-    y_row[i] = (sizeof(scalar_t) == sizeof(half)) ? to_half(yi) : (scalar_t)yi;
+    y_row[i] = from_float<scalar_t>(yi);
   }
 }
 
-// Backward kernel: compute dx, accumulate dweight
+// Backward kernel: compute dx, accumulate dweight (in FP32)
 
 template<typename scalar_t>
 __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
@@ -223,7 +228,7 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
                                    const scalar_t* __restrict__ w,
                                    const float* __restrict__ inv_rms_in,
                                    scalar_t* __restrict__ dx,
-                                   scalar_t* __restrict__ dw,
+                                   float* __restrict__ dw_fp32,
                                    int hidden) {
   int row = blockIdx.x;
   int tid = threadIdx.x;
@@ -246,10 +251,14 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
     dot += xi * du;
     // dweight += dy * (x * inv_rms)
     float contrib = dyi * (xi * inv_rms);
-    atomicAdd((float*)dw + i, contrib);
+    atomicAdd(dw_fp32 + i, contrib);
   }
-  dot = blockReduceSum<float>(dot);
-  float a = -r3_over_N * dot;
+  float reduced_dot = blockReduceSum<float>(dot);
+
+  __shared__ float s_dot;
+  if (tid == 0) s_dot = reduced_dot;
+  __syncthreads();
+  float a = -r3_over_N * s_dot;
 
   // Second pass: dx = inv_rms * du + x * a
   for (int i = tid; i < hidden; i += stride) {
@@ -258,14 +267,13 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
     float xi  = to_float(x_row[i]);
     float du  = dyi * wi;
     float dxi = inv_rms * du + xi * a;
-    dx_row[i] = (sizeof(scalar_t) == sizeof(half)) ? to_half(dxi) : (scalar_t)dxi;
+    dx_row[i] = from_float<scalar_t>(dxi);
   }
 }
 
 std::vector<torch::Tensor> rmsnorm_forward_cuda(torch::Tensor x, torch::Tensor weight, double eps) {
   TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
   TORCH_CHECK(weight.is_contiguous(), "weight must be contiguous");
-  auto B = x.size(0) * x.size(1) / x.size(-1);
   int rows = x.numel() / x.size(-1);
   int hidden = x.size(-1);
 
@@ -273,6 +281,7 @@ std::vector<torch::Tensor> rmsnorm_forward_cuda(torch::Tensor x, torch::Tensor w
   auto inv_rms = torch::empty({rows}, x.options().dtype(torch::kFloat));
 
   int threads = std::min(1024, 1 << (int)std::ceil(std::log2((double)hidden)));
+  threads = max(32, threads); // at least one warp
   dim3 block(threads);
   dim3 grid(rows);
 
@@ -297,9 +306,11 @@ std::vector<torch::Tensor> rmsnorm_backward_cuda(torch::Tensor dy, torch::Tensor
   int hidden = x.size(-1);
 
   auto dx = torch::empty_like(x);
-  auto dw = torch::zeros_like(weight);
+  // Accumulate dweight in fp32 for stability (and to support half weights)
+  auto dw32 = torch::zeros({weight.size(0)}, x.options().dtype(torch::kFloat));
 
   int threads = std::min(1024, 1 << (int)std::ceil(std::log2((double)hidden)));
+  threads = max(32, threads);
   dim3 block(threads);
   dim3 grid(rows);
 
@@ -308,14 +319,19 @@ std::vector<torch::Tensor> rmsnorm_backward_cuda(torch::Tensor dy, torch::Tensor
   if (x.scalar_type() == torch::kFloat16) {
     rmsnorm_bwd_kernel<half><<<grid, block, 0, stream>>>(
       (half*)dy.data_ptr<at::Half>(), (half*)x.data_ptr<at::Half>(), (half*)weight.data_ptr<at::Half>(),
-      inv_rms.data_ptr<float>(), (half*)dx.data_ptr<at::Half>(), (half*)dw.data_ptr<at::Half>(), hidden);
+      inv_rms.data_ptr<float>(), (half*)dx.data_ptr<at::Half>(), dw32.data_ptr<float>(), hidden);
   } else if (x.scalar_type() == torch::kFloat32) {
     rmsnorm_bwd_kernel<float><<<grid, block, 0, stream>>>(
       dy.data_ptr<float>(), x.data_ptr<float>(), weight.data_ptr<float>(),
-      inv_rms.data_ptr<float>(), dx.data_ptr<float>(), dw.data_ptr<float>(), hidden);
+      inv_rms.data_ptr<float>(), dx.data_ptr<float>(), dw32.data_ptr<float>(), hidden);
   } else {
     TORCH_CHECK(false, "Unsupported dtype");
   }
+
+  // Cast dweight to parameter dtype
+  auto dw = (weight.scalar_type() == torch::kFloat16)
+              ? dw32.to(torch::kHalf)
+              : dw32;
   return {dx, dw};
 }
 ```
@@ -464,8 +480,14 @@ class CharDataset(torch.utils.data.Dataset):
 def build_tokenizer(corpus_paths, out_path):
     tok = Tokenizer(BPE(unk_token="<unk>"))
     tok.pre_tokenizer = Whitespace()
-    trainer = BpeTrainer(vocab_size=4096, special_tokens=["<unk>"])
-    tok.train(files=corpus_paths, trainer=trainer)
+    trainer = BpeTrainer(vocab_size=4096, min_frequency=2, special_tokens=["<unk>"])
+    # Streamed training to avoid RAM blowups
+    def line_iter():
+        for p in corpus_paths:
+            with open(p, 'r', encoding='utf-8') as f:
+                for line in f:
+                    yield line.strip()
+    tok.train_from_iterator(line_iter(), trainer=trainer)
     tok.save(out_path)
     return tok
 
@@ -493,7 +515,6 @@ def main():
     ap.add_argument('--n_heads', type=int, default=6)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--compile', action='store_true')
-    ap.add_argument('--flash', action='store_true')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -507,11 +528,10 @@ def main():
 
     if not os.path.exists('tokenizer.json'):
         build_tokenizer([train_path, val_path], 'tokenizer.json')
-    from tokenizers import Tokenizer
     tok = Tokenizer.from_file('tokenizer.json')
 
-    with open(train_path, 'r') as f: train_text = f.read()
-    with open(val_path, 'r') as f: val_text = f.read()
+    with open(train_path, 'r', encoding='utf-8') as f: train_text = f.read()
+    with open(val_path, 'r', encoding='utf-8') as f: val_text = f.read()
 
     train_ds = CharDataset(train_text, args.seq_len, tok)
     val_ds   = CharDataset(val_text, args.seq_len, tok)
@@ -524,7 +544,6 @@ def main():
         model = torch.compile(model)
 
     opt = AdamW(model.parameters(), lr=args.lr)
-
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
     best = 1e9
@@ -542,7 +561,17 @@ def main():
             val_loss = evaluate(model, val_dl, sin, cos, device)
             if val_loss < best:
                 best = val_loss
-                torch.save({'model': model.state_dict(), 'tok': tok.to_str()}, 'out/best.pt')
+                base = getattr(model, "_orig_mod", model)
+                torch.save({
+                    'model': base.state_dict(),
+                    'tok': tok.to_str(),
+                    'config': {
+                        'dim': base.dim,
+                        'n_layers': len(base.blocks),
+                        'n_heads': base.n_heads,
+                        'vocab_size': tok.get_vocab_size(),
+                    }
+                }, 'out/best.pt')
         if step+1 >= args.steps:
             break
 
@@ -555,35 +584,89 @@ if __name__ == '__main__':
 ## infer.py
 
 ```python
-import argparse, torch
+import argparse, torch, random
 from model import TinyLM, build_sincos, prealloc_kvcache
 from tokenizers import Tokenizer
 
-def generate(model, tok, prompt, max_new_tokens=128, temperature=1.0):
+def sample_top_p(logits, top_p=0.9):
+    probs = torch.softmax(logits, dim=-1)
+    sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+    cdf = torch.cumsum(sorted_probs, dim=-1)
+    mask = cdf > top_p
+    # Keep at least 1 token
+    mask[..., 0] = False
+    sorted_probs[mask] = 0.0
+    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+    idx = torch.multinomial(sorted_probs, num_samples=1)
+    next_token = sorted_idx.gather(-1, idx)
+    return next_token
+
+@torch.no_grad()
+def generate(model, tok, prompt, max_new_tokens=128, temperature=1.0, top_p=0.9,
+             repetition_penalty=1.1, freq_penalty=0.0, presence_penalty=0.0, seed=0, stream=False):
+    if seed is not None:
+        random.seed(seed); torch.manual_seed(seed); torch.cuda.manual_seed_all(seed)
     device = next(model.parameters()).device
     sin, cos = build_sincos(8192, model.dim // model.n_heads, device)
     ids = torch.tensor(tok.encode(prompt).ids, device=device).unsqueeze(0)
     cache = prealloc_kvcache(1, ids.size(1)+max_new_tokens, model.n_heads, model.dim//model.n_heads, device, dtype=next(model.parameters()).dtype)
-    with torch.no_grad():
-        for t in range(max_new_tokens):
-            logits = model(ids[:, -1:].contiguous(), sin, cos, cache, start_pos=ids.size(1)-1)
-            logits = logits[:, -1, :] / max(1e-8, temperature)
-            next_id = torch.argmax(logits, dim=-1, keepdim=True)
-            ids = torch.cat([ids, next_id], dim=1)
+
+    recent_window = 512
+    for _ in range(max_new_tokens):
+        logits = model(ids[:, -1:], sin, cos, cache, start_pos=ids.size(1)-1)
+        logits = logits[:, -1, :]
+        # Repetition penalty / frequency & presence penalties
+        if ids.size(1) > 0 and (repetition_penalty > 1.0 or freq_penalty > 0.0 or presence_penalty > 0.0):
+            recent = ids[:, -recent_window:]
+            for b in range(ids.size(0)):
+                unique, counts = torch.unique(recent[b], return_counts=True)
+                if repetition_penalty > 1.0:
+                    logits[b, unique] /= repetition_penalty
+                if freq_penalty > 0.0:
+                    logits[b, unique] -= freq_penalty * counts.to(logits.dtype)
+                if presence_penalty > 0.0:
+                    logits[b, unique] -= presence_penalty
+        # Temperature
+        if temperature != 1.0:
+            logits = logits / max(1e-8, temperature)
+        # Nucleus sampling
+        next_id = sample_top_p(logits, top_p=top_p)
+        ids = torch.cat([ids, next_id], dim=1)
+        if stream:
+            print(tok.decode(ids[0].tolist()), flush=True)
     return tok.decode(ids[0].tolist())
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--ckpt', type=str, required=True)
     ap.add_argument('--prompt', type=str, default='Once upon a time')
     ap.add_argument('--max_new_tokens', type=int, default=128)
+    ap.add_argument('--temperature', type=float, default=0.9)
+    ap.add_argument('--top_p', type=float, default=0.9)
+    ap.add_argument('--repetition_penalty', type=float, default=1.1)
+    ap.add_argument('--freq_penalty', type=float, default=0.0)
+    ap.add_argument('--presence_penalty', type=float, default=0.0)
+    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--stream', action='store_true')
     args = ap.parse_args()
 
     ckpt = torch.load(args.ckpt, map_location='cpu')
     tok = Tokenizer.from_str(ckpt['tok'])
-    model = TinyLM(tok.get_vocab_size()).cuda().eval()
-    model.load_state_dict(ckpt['model'])
-    txt = generate(model, tok, args.prompt, args.max_new_tokens)
+
+    cfg = ckpt.get('config', None)
+    if cfg is None:
+        cfg = {'dim': 384, 'n_layers': 6, 'n_heads': 6, 'vocab_size': tok.get_vocab_size()}
+
+    model = TinyLM(vocab_size=cfg['vocab_size'], dim=cfg['dim'], n_layers=cfg['n_layers'], n_heads=cfg['n_heads']).cuda().eval()
+
+    state = ckpt['model']
+    if any(k.startswith('_orig_mod.') for k in state):
+        state = {k.replace('_orig_mod.', '', 1): v for k, v in state.items()}
+    model.load_state_dict(state, strict=False)
+
+    txt = generate(model, tok, args.prompt, args.max_new_tokens, args.temperature, args.top_p,
+                   args.repetition_penalty, args.freq_penalty, args.presence_penalty, args.seed, args.stream)
     print(txt)
 
 if __name__ == '__main__':
@@ -668,6 +751,19 @@ def test_backward_close():
 
     assert torch.allclose(dx, dx2, atol=1e-3, rtol=1e-3)
     assert torch.allclose(dw, dw2, atol=1e-3, rtol=1e-3)
+```
+
+---
+
+## tests/conftest.py
+
+```python
+# Ensure the project root is importable without touching PYTHONPATH.
+# PyTest loads this automatically.
+import os, sys
+ROOT = os.path.dirname(os.path.dirname(__file__))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
 ```
 
 ---
@@ -770,16 +866,23 @@ services:
       context: .
       dockerfile: Dockerfile
     image: nanofalcon:latest
-    gpus: all
     shm_size: "8g"
     environment:
-      NVIDIA_VISIBLE_DEVICES: "all"
-      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
       HF_HOME: "/workspace/.cache/huggingface"
       TOKENIZERS_PARALLELISM: "false"
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "compute,utility"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     volumes:
       - hf-cache:/workspace/.cache/huggingface
       - outputs:/workspace/app/out
+      - ./data:/workspace/app/data
     working_dir: /workspace/app
     command: >
       bash -lc "python data/prepare_tinystories.py &&
@@ -791,6 +894,17 @@ services:
 volumes:
   hf-cache:
   outputs:
+```
+
+**Note (legacy setups):** if your Docker Compose ignores `deploy` outside Swarm, add this override file and include it with `-f compose.legacy-gpu.yml`:
+
+```yaml
+# compose.legacy-gpu.yml
+version: "3.9"
+services:
+  nanofalcon:
+    # Older NVIDIA Toolkit path (deprecated, but works widely)
+    runtime: nvidia
 ```
 
 ---

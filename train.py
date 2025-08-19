@@ -1,3 +1,6 @@
+import argparse, os
+import torch
+import torch.nn as nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from datasets import load_dataset
@@ -23,8 +26,14 @@ class CharDataset(torch.utils.data.Dataset):
 def build_tokenizer(corpus_paths, out_path):
     tok = Tokenizer(BPE(unk_token="<unk>"))
     tok.pre_tokenizer = Whitespace()
-    trainer = BpeTrainer(vocab_size=4096, special_tokens=["<unk>"])
-    tok.train(files=corpus_paths, trainer=trainer)
+    trainer = BpeTrainer(vocab_size=4096, min_frequency=2, special_tokens=["<unk>"])
+    # Streamed training to avoid RAM blowups
+    def line_iter():
+        for p in corpus_paths:
+            with open(p, 'r', encoding='utf-8') as f:
+                for line in f:
+                    yield line.strip()
+    tok.train_from_iterator(line_iter(), trainer=trainer)
     tok.save(out_path)
     return tok
 
@@ -52,7 +61,6 @@ def main():
     ap.add_argument('--n_heads', type=int, default=6)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--compile', action='store_true')
-    ap.add_argument('--flash', action='store_true')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -66,11 +74,10 @@ def main():
 
     if not os.path.exists('tokenizer.json'):
         build_tokenizer([train_path, val_path], 'tokenizer.json')
-    from tokenizers import Tokenizer
     tok = Tokenizer.from_file('tokenizer.json')
 
-    with open(train_path, 'r') as f: train_text = f.read()
-    with open(val_path, 'r') as f: val_text = f.read()
+    with open(train_path, 'r', encoding='utf-8') as f: train_text = f.read()
+    with open(val_path, 'r', encoding='utf-8') as f: val_text = f.read()
 
     train_ds = CharDataset(train_text, args.seq_len, tok)
     val_ds   = CharDataset(val_text, args.seq_len, tok)
@@ -83,7 +90,6 @@ def main():
         model = torch.compile(model)
 
     opt = AdamW(model.parameters(), lr=args.lr)
-
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
     best = 1e9
@@ -101,7 +107,17 @@ def main():
             val_loss = evaluate(model, val_dl, sin, cos, device)
             if val_loss < best:
                 best = val_loss
-                torch.save({'model': model.state_dict(), 'tok': tok.to_str()}, 'out/best.pt')
+                base = getattr(model, "_orig_mod", model)
+                torch.save({
+                    'model': base.state_dict(),
+                    'tok': tok.to_str(),
+                    'config': {
+                        'dim': base.dim,
+                        'n_layers': len(base.blocks),
+                        'n_heads': base.n_heads,
+                        'vocab_size': tok.get_vocab_size(),
+                    }
+                }, 'out/best.pt')
         if step+1 >= args.steps:
             break
 

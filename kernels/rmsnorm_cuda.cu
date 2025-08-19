@@ -2,47 +2,47 @@
 #include <cuda_fp16.h>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <type_traits>
 #include <cmath>
 
-// Utility: type traits
+// Conversions
+__device__ inline float to_float(float x) { return x; }
+__device__ inline float to_float(half x)  { return __half2float(x); }
 
 template<typename T>
-struct Vec { using scalar = T; };
+__device__ inline T from_float(float x);
 
 template<>
-struct Vec<half> { using scalar = half; };
+__device__ inline float from_float<float>(float x) { return x; }
 
-// Load/store helpers
-__device__ inline float to_float(float x) { return x; }
-__device__ inline float to_float(half x) { return __half2float(x); }
-__device__ inline half  to_half(float x) { return __float2half(x); }
+template<>
+__device__ inline half from_float<half>(float x) { return __float2half(x); }
 
-// Block reduction (sum)
+// Block reduction (sum) that returns the reduced value in lane 0 of warp 0
+// (Other threads will have undefined 'val'; we'll broadcast via shared mem.)
 template<typename T>
 __inline__ __device__ T blockReduceSum(T val) {
   __shared__ T shared[32];
   int lane = threadIdx.x & 31;
   int wid  = threadIdx.x >> 5;
-
   // warp reduce
   #pragma unroll
   for (int offset = 16; offset > 0; offset >>= 1)
     val += __shfl_down_sync(0xffffffff, val, offset);
-
+  // write per-warp sum
   if (lane == 0) shared[wid] = val;
   __syncthreads();
-
-  val = (threadIdx.x < blockDim.x / 32) ? shared[lane] : 0;
+  // first warp loads per-warp sums
+  val = (lane < (blockDim.x + 31) / 32) ? shared[lane] : 0;
   if (wid == 0) {
     #pragma unroll
     for (int offset = 16; offset > 0; offset >>= 1)
       val += __shfl_down_sync(0xffffffff, val, offset);
   }
-  return val;
+  return val; // valid in warp 0, lane 0
 }
 
 // Forward kernel: per-row RMS + scale + weight
-
 template<typename scalar_t>
 __global__ void rmsnorm_fwd_kernel(const scalar_t* __restrict__ x,
                                    const scalar_t* __restrict__ w,
@@ -61,20 +61,25 @@ __global__ void rmsnorm_fwd_kernel(const scalar_t* __restrict__ x,
     float xi = to_float(x_row[i]);
     sumsq += xi * xi;
   }
-  sumsq = blockReduceSum<float>(sumsq);
+  float reduced = blockReduceSum<float>(sumsq);
 
-  float inv_rms = rsqrtf(sumsq / hidden + eps);
-  if (tid == 0) inv_rms_out[row] = inv_rms;
+  __shared__ float s_inv_rms;
+  if (tid == 0) {
+    s_inv_rms = rsqrtf(reduced / hidden + eps);
+    inv_rms_out[row] = s_inv_rms;
+  }
+  __syncthreads();
+  float inv_rms = s_inv_rms; // broadcast
 
   for (int i = tid; i < hidden; i += stride) {
     float xi = to_float(x_row[i]);
     float wi = to_float(w[i]);
     float yi = (xi * inv_rms) * wi;
-    y_row[i] = (sizeof(scalar_t) == sizeof(half)) ? to_half(yi) : (scalar_t)yi;
+    y_row[i] = from_float<scalar_t>(yi);
   }
 }
 
-// Backward kernel: compute dx, accumulate dweight
+// Backward kernel: compute dx, accumulate dweight (in FP32)
 
 template<typename scalar_t>
 __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
@@ -82,7 +87,7 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
                                    const scalar_t* __restrict__ w,
                                    const float* __restrict__ inv_rms_in,
                                    scalar_t* __restrict__ dx,
-                                   scalar_t* __restrict__ dw,
+                                   float* __restrict__ dw_fp32,
                                    int hidden) {
   int row = blockIdx.x;
   int tid = threadIdx.x;
@@ -105,10 +110,14 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
     dot += xi * du;
     // dweight += dy * (x * inv_rms)
     float contrib = dyi * (xi * inv_rms);
-    atomicAdd((float*)dw + i, contrib);
+    atomicAdd(dw_fp32 + i, contrib);
   }
-  dot = blockReduceSum<float>(dot);
-  float a = -r3_over_N * dot;
+  float reduced_dot = blockReduceSum<float>(dot);
+
+  __shared__ float s_dot;
+  if (tid == 0) s_dot = reduced_dot;
+  __syncthreads();
+  float a = -r3_over_N * s_dot;
 
   // Second pass: dx = inv_rms * du + x * a
   for (int i = tid; i < hidden; i += stride) {
@@ -117,14 +126,13 @@ __global__ void rmsnorm_bwd_kernel(const scalar_t* __restrict__ dy,
     float xi  = to_float(x_row[i]);
     float du  = dyi * wi;
     float dxi = inv_rms * du + xi * a;
-    dx_row[i] = (sizeof(scalar_t) == sizeof(half)) ? to_half(dxi) : (scalar_t)dxi;
+    dx_row[i] = from_float<scalar_t>(dxi);
   }
 }
 
 std::vector<torch::Tensor> rmsnorm_forward_cuda(torch::Tensor x, torch::Tensor weight, double eps) {
   TORCH_CHECK(x.is_contiguous(), "x must be contiguous");
   TORCH_CHECK(weight.is_contiguous(), "weight must be contiguous");
-  auto B = x.size(0) * x.size(1) / x.size(-1);
   int rows = x.numel() / x.size(-1);
   int hidden = x.size(-1);
 
@@ -132,6 +140,7 @@ std::vector<torch::Tensor> rmsnorm_forward_cuda(torch::Tensor x, torch::Tensor w
   auto inv_rms = torch::empty({rows}, x.options().dtype(torch::kFloat));
 
   int threads = std::min(1024, 1 << (int)std::ceil(std::log2((double)hidden)));
+  threads = max(32, threads); // at least one warp
   dim3 block(threads);
   dim3 grid(rows);
 
@@ -156,9 +165,11 @@ std::vector<torch::Tensor> rmsnorm_backward_cuda(torch::Tensor dy, torch::Tensor
   int hidden = x.size(-1);
 
   auto dx = torch::empty_like(x);
-  auto dw = torch::zeros_like(weight);
+  // Accumulate dweight in fp32 for stability (and to support half weights)
+  auto dw32 = torch::zeros({weight.size(0)}, x.options().dtype(torch::kFloat));
 
   int threads = std::min(1024, 1 << (int)std::ceil(std::log2((double)hidden)));
+  threads = max(32, threads);
   dim3 block(threads);
   dim3 grid(rows);
 
@@ -167,13 +178,18 @@ std::vector<torch::Tensor> rmsnorm_backward_cuda(torch::Tensor dy, torch::Tensor
   if (x.scalar_type() == torch::kFloat16) {
     rmsnorm_bwd_kernel<half><<<grid, block, 0, stream>>>(
       (half*)dy.data_ptr<at::Half>(), (half*)x.data_ptr<at::Half>(), (half*)weight.data_ptr<at::Half>(),
-      inv_rms.data_ptr<float>(), (half*)dx.data_ptr<at::Half>(), (half*)dw.data_ptr<at::Half>(), hidden);
+      inv_rms.data_ptr<float>(), (half*)dx.data_ptr<at::Half>(), dw32.data_ptr<float>(), hidden);
   } else if (x.scalar_type() == torch::kFloat32) {
     rmsnorm_bwd_kernel<float><<<grid, block, 0, stream>>>(
       dy.data_ptr<float>(), x.data_ptr<float>(), weight.data_ptr<float>(),
-      inv_rms.data_ptr<float>(), dx.data_ptr<float>(), dw.data_ptr<float>(), hidden);
+      inv_rms.data_ptr<float>(), dx.data_ptr<float>(), dw32.data_ptr<float>(), hidden);
   } else {
     TORCH_CHECK(false, "Unsupported dtype");
   }
+
+  // Cast dweight to parameter dtype
+  auto dw = (weight.scalar_type() == torch::kFloat16)
+              ? dw32.to(torch::kHalf)
+              : dw32;
   return {dx, dw};
 }

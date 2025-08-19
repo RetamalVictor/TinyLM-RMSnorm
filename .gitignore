@@ -1,0 +1,94 @@
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Unit test / coverage reports
+.coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+*.cover
+*.py,cover
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# Logs
+*.log
+
+# =========================
+# CUDA
+# =========================
+# CUDA source intermediates
+*.cu.cpp
+*.cubin
+*.fatbin
+*.ptx
+*.sass
+*.module_id
+
+# Build intermediates
+*.o
+*.obj
+*.lo
+*.la
+*.lai
+*.a
+*.lib
+*.so
+*.dll
+*.dylib
+*.d
+
+# Nsight and profiling
+*.nvvp
+*.nsight-rep
+
+# =========================
+# OS-specific
+# =========================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Linux
+*~
+
+# others
+*.txt
+out/
