@@ -45,7 +45,8 @@ Memory grows linearly with the maximum context due to per-layer K/V tensors.
 
 Loss curves from a short run—handy to sanity-check the training loop.
 
-* Figure: [`plots/fig_training_curve.png`](plots/fig_training_curve.png)
+![`plots/fig_training_curve.png`](plots/fig_training_curve.png)
+* Raw log: [`plots/train_log.csv`](plots/train_log.csv)
 
 > Note: end-to-end decode ablation for RMSNorm shows a **small but real** ms/token improvement (the kernel is a small slice of the total). See [`plots/fig_ablation.png`](plots/fig_ablation.png) and [`plots/ablation_rmsnorm.csv`](plots/ablation_rmsnorm.csv) if generated.
 
@@ -62,9 +63,7 @@ Loss curves from a short run—handy to sanity-check the training loop.
 
 * **RMSNorm** (channel-wise, ε=1e-6):
 
-\[
-\mathrm{RMSNorm}(x)= x \cdot \frac{1}{\sqrt{\tfrac{1}{d}\sum_{i=1}^{d} x_i^2 + \varepsilon}} \odot w
-\]
+!['RMSnorm'](plots/eq_rmsnorm.png)
 
   The fused kernel computes the per-token RMS + scale in one pass with coalesced loads/stores.
 
