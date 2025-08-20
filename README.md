@@ -1,6 +1,6 @@
 # TinyLM + CUDA RMSNorm + KV-Cache Ablations
 
-TinyLM is a bite-size project to demonstrate end-to-end LM engineering: a compact Transformer, a **fused CUDA RMSNorm** kernel, and **decode-time KV-cache** benchmarks/ablations. It’s designed to be built in \~a day, run on a laptop 2070 Mobile, and scale to a 4090 for larger sweeps.
+TinyLM is a bite-size project to demonstrate end-to-end LM engineering: a compact Transformer, a **fused CUDA RMSNorm** kernel, and **decode-time KV-cache** benchmarks/ablations. It’s designed to run on a laptop 2070 Mobile, and scale to a 4090 for larger sweeps.
 
 ## Why this exists
 
@@ -46,7 +46,6 @@ Memory grows linearly with the maximum context due to per-layer K/V tensors.
 Loss curves from a short run—handy to sanity-check the training loop.
 
 * Figure: [`plots/fig_training_curve.png`](plots/fig_training_curve.png)
-* Raw log: [`plots/train_log.csv`](plots/train_log.csv)
 
 > Note: end-to-end decode ablation for RMSNorm shows a **small but real** ms/token improvement (the kernel is a small slice of the total). See [`plots/fig_ablation.png`](plots/fig_ablation.png) and [`plots/ablation_rmsnorm.csv`](plots/ablation_rmsnorm.csv) if generated.
 
@@ -63,10 +62,9 @@ Loss curves from a short run—handy to sanity-check the training loop.
 
 * **RMSNorm** (channel-wise, ε=1e-6):
 
-  $$
-  \mathrm{rms}(x)=\sqrt{\tfrac{1}{d}\sum_i x_i^2+\varepsilon},\quad
-  \mathrm{RMSNorm}(x)=x\cdot \mathrm{rms}(x)^{-1}\cdot w
-  $$
+\[
+\mathrm{RMSNorm}(x)= x \cdot \frac{1}{\sqrt{\tfrac{1}{d}\sum_{i=1}^{d} x_i^2 + \varepsilon}} \odot w
+\]
 
   The fused kernel computes the per-token RMS + scale in one pass with coalesced loads/stores.
 
