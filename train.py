@@ -1,4 +1,4 @@
-import argparse, os
+import argparse, os, csv
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
@@ -61,6 +61,7 @@ def main():
     ap.add_argument('--n_heads', type=int, default=6)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--compile', action='store_true')
+    ap.add_argument('--log_csv', type=str, default='out/train_log.csv')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -71,6 +72,8 @@ def main():
     else:
         train_path = 'data/tinyshakespeare_train.txt'
         val_path   = 'data/tinyshakespeare_val.txt'
+
+    os.makedirs('out', exist_ok=True)
 
     if not os.path.exists('tokenizer.json'):
         build_tokenizer([train_path, val_path], 'tokenizer.json')
@@ -93,33 +96,48 @@ def main():
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
     best = 1e9
-    os.makedirs('out', exist_ok=True)
 
-    for step, (x, y) in enumerate(tqdm(train_dl, total=args.steps)):
-        x, y = x.to(device), y.to(device)
-        logits = model(x, sin, cos)
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        opt.step()
+    # CSV logger
+    with open(args.log_csv, 'w', newline='') as fcsv:
+        writer = csv.writer(fcsv)
+        writer.writerow(['step','train_loss','val_loss'])
 
-        if step % 100 == 0:
-            val_loss = evaluate(model, val_dl, sin, cos, device)
-            if val_loss < best:
-                best = val_loss
-                base = getattr(model, "_orig_mod", model)
-                torch.save({
-                    'model': base.state_dict(),
-                    'tok': tok.to_str(),
-                    'config': {
-                        'dim': base.dim,
-                        'n_layers': len(base.blocks),
-                        'n_heads': base.n_heads,
-                        'vocab_size': tok.get_vocab_size(),
-                    }
-                }, 'out/best.pt')
-        if step+1 >= args.steps:
-            break
+        step = 0
+        train_iter = iter(train_dl)
+        pbar = tqdm(total=args.steps)
+        while step < args.steps:
+            try:
+                x, y = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_dl)
+                x, y = next(train_iter)
+            x, y = x.to(device), y.to(device)
+            logits = model(x, sin, cos)
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+            opt.zero_grad(set_to_none=True)
+            loss.backward()
+            opt.step()
+
+            val_loss = ''
+            if step % 100 == 0:
+                val_loss = evaluate(model, val_dl, sin, cos, device)
+                if val_loss < best:
+                    best = val_loss
+                    base = getattr(model, "_orig_mod", model)
+                    torch.save({
+                        'model': base.state_dict(),
+                        'tok': tok.to_str(),
+                        'config': {
+                            'dim': base.dim,
+                            'n_layers': len(base.blocks),
+                            'n_heads': base.n_heads,
+                            'vocab_size': tok.get_vocab_size(),
+                        }
+                    }, 'out/best.pt')
+            writer.writerow([step, float(loss.item()), ('' if val_loss=='' else float(val_loss))])
+            step += 1
+            pbar.update(1)
+        pbar.close()
 
 if __name__ == '__main__':
     main()

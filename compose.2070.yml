@@ -1,5 +1,5 @@
 services:
-  nanofalcon:
+  tinyml:
     environment:
       PYTORCH_CUDA_ALLOC_CONF: "max_split_size_mb:64"
     command: >

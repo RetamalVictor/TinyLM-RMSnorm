@@ -1,9 +1,9 @@
 services:
-  nanofalcon:
+  tinyml:
     build:
       context: .
       dockerfile: Dockerfile
-    image: nanofalcon:dev
+    image: tinyml:dev
     shm_size: "8g"
     environment:
       HF_HOME: "/workspace/.cache/huggingface"
