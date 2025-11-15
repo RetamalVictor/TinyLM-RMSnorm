@@ -38,7 +38,7 @@ jobs:
     continue-on-error: true  # Optional check for portfolio project
     strategy:
       matrix:
-        python-version: ['3.8', '3.9', '3.10']
+        python-version: ['3.9', '3.10', '3.11']  # Python 3.8 EOL October 2024
 
     steps:
       - uses: actions/checkout@v3
