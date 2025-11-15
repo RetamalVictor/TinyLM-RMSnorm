@@ -32,20 +32,26 @@ def measure_with_kv(m, ids, steps, sin, cos, cfg, dtype):
     return steps/(t1-t0)
 
 def measure_no_kv(m, ids, steps, sin, cos, cfg, dtype):
-    dhead = cfg['dim']//cfg['n_heads']
-    # warmup
+    """Measure throughput without KV-cache by recomputing full sequence each time."""
+    # warmup - process full sequence without cache
     tmp = ids.clone()
     for _ in range(3):
-        cache = prealloc_kvcache(1, tmp.size(1)+1, cfg['n_heads'], dhead, ids.device.type, dtype)
-        logits = m(tmp, sin, cos, cache, start_pos=0)[:, -1, :]
+        # Process entire sequence without cache (cache=None means no caching)
+        logits = m(tmp, sin, cos, cache=None, start_pos=0)[:, -1, :]
         tmp = torch.cat([tmp, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    torch.cuda.synchronize(); t0 = time.time()
+
+    torch.cuda.synchronize()
+    t0 = time.time()
+
+    # Actual measurement
     tmp = ids.clone()
     for _ in range(steps):
-        cache = prealloc_kvcache(1, tmp.size(1)+1, cfg['n_heads'], dhead, ids.device.type, dtype)
-        logits = m(tmp, sin, cos, cache, start_pos=0)[:, -1, :]
+        # Process entire sequence from scratch each time (no cache)
+        logits = m(tmp, sin, cos, cache=None, start_pos=0)[:, -1, :]
         tmp = torch.cat([tmp, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    torch.cuda.synchronize(); t1 = time.time()
+
+    torch.cuda.synchronize()
+    t1 = time.time()
     return steps/(t1-t0)
 
 if __name__ == "__main__":
