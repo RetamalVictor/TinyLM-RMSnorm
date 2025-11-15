@@ -47,9 +47,12 @@ def evaluate(model, dl, sin, cos, device):
         x, y = x.to(device), y.to(device)
         logits = model(x, sin, cos)
         loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        loss_sum += loss.item(); n += 1
+        loss_sum += loss.item()
+        n += 1
     model.train()
-    return loss_sum / max(1, n)
+    avg_loss = loss_sum / max(1, n)
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    return avg_loss, perplexity
 
 def main():
     ap = argparse.ArgumentParser()
@@ -143,7 +146,7 @@ def main():
     # CSV logger
     with open(args.log_csv, 'w', newline='') as fcsv:
         writer = csv.writer(fcsv)
-        writer.writerow(['step','train_loss','val_loss','lr'])
+        writer.writerow(['step','train_loss','train_ppl','val_loss','val_ppl','lr'])
 
         step = 0
         train_iter = iter(train_dl)
@@ -182,9 +185,15 @@ def main():
                 else:
                     raise e
 
+            # Calculate training perplexity
+            train_loss_val = loss.item()
+            train_ppl = torch.exp(torch.tensor(train_loss_val)).item()
+
+            # Validation evaluation
             val_loss = ''
+            val_ppl = ''
             if step % 100 == 0:
-                val_loss = evaluate(model, val_dl, sin, cos, device)
+                val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device)
                 if val_loss < best:
                     best = val_loss
                     base = getattr(model, "_orig_mod", model)
@@ -198,11 +207,25 @@ def main():
                             'vocab_size': tok.get_vocab_size(),
                         }
                     }, 'out/best.pt')
-            writer.writerow([step, float(loss.item()), ('' if val_loss=='' else float(val_loss)), get_lr()])
+                    print(f"\n[Step {step}] New best validation loss: {val_loss:.3f} (PPL: {val_ppl:.1f})")
+
+            writer.writerow([
+                step,
+                float(train_loss_val),
+                float(train_ppl),
+                ('' if val_loss=='' else float(val_loss)),
+                ('' if val_ppl=='' else float(val_ppl)),
+                get_lr()
+            ])
             step += 1
-            pbar.set_description(f'Loss: {loss.item():.3f}, LR: {get_lr():.2e}')
+            pbar.set_description(f'Loss: {train_loss_val:.3f} (PPL: {train_ppl:.1f}), LR: {get_lr():.2e}')
             pbar.update(1)
         pbar.close()
+
+        # Final summary
+        print(f"\nTraining completed!")
+        print(f"Best validation loss: {best:.3f} (PPL: {torch.exp(torch.tensor(best)).item():.1f})")
+        print(f"Model saved to: out/best.pt")
 
 if __name__ == '__main__':
     main()
