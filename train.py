@@ -39,14 +39,19 @@ def build_tokenizer(corpus_paths, out_path):
     return tok
 
 @torch.no_grad()
-def evaluate(model, dl, sin, cos, device):
+def evaluate(model, dl, sin, cos, device, use_amp=False):
     model.eval()
     loss_sum = 0
     n = 0
     for x, y in dl:
         x, y = x.to(device), y.to(device)
-        logits = model(x, sin, cos)
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        if use_amp and device == 'cuda':
+            with torch.cuda.amp.autocast():
+                logits = model(x, sin, cos)
+                loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        else:
+            logits = model(x, sin, cos)
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
         loss_sum += loss.item()
         n += 1
     model.train()
@@ -69,6 +74,8 @@ def main():
     ap.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
     ap.add_argument('--warmup_steps', type=int, default=100, help='Number of warmup steps')
     ap.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'linear', 'constant'])
+    ap.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training (FP16)')
+    ap.add_argument('--fp16_scale_window', type=int, default=1000, help='Loss scale update frequency')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -125,6 +132,9 @@ def main():
     opt = AdamW(model.parameters(), lr=args.lr)
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
+    # Create gradient scaler for mixed precision
+    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision) if device == 'cuda' else None
+
     # Create learning rate scheduler
     if args.lr_schedule == 'cosine':
         scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
@@ -160,17 +170,39 @@ def main():
                     x, y = next(train_iter)
                 x, y = x.to(device), y.to(device)
 
-                # Forward pass with OOM handling
-                logits = model(x, sin, cos)
-                loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                # Forward pass with mixed precision
                 opt.zero_grad(set_to_none=True)
-                loss.backward()
 
-                # Gradient clipping
-                if args.grad_clip > 0:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                if args.mixed_precision and scaler is not None:
+                    # Mixed precision training
+                    with torch.cuda.amp.autocast():
+                        logits = model(x, sin, cos)
+                        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
 
-                opt.step()
+                    # Backward pass with gradient scaling
+                    scaler.scale(loss).backward()
+
+                    # Unscale gradients for clipping
+                    scaler.unscale_(opt)
+
+                    # Gradient clipping
+                    if args.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                    # Optimizer step with scaler
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    # Standard training
+                    logits = model(x, sin, cos)
+                    loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    loss.backward()
+
+                    # Gradient clipping
+                    if args.grad_clip > 0:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                    opt.step()
 
                 # Update learning rate
                 if scheduler is not None:
@@ -193,7 +225,7 @@ def main():
             val_loss = ''
             val_ppl = ''
             if step % 100 == 0:
-                val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device)
+                val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=args.mixed_precision)
                 if val_loss < best:
                     best = val_loss
                     base = getattr(model, "_orig_mod", model)
