@@ -2,6 +2,7 @@ import argparse, os, csv
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
+import torch.optim.lr_scheduler
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -62,6 +63,9 @@ def main():
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--compile', action='store_true')
     ap.add_argument('--log_csv', type=str, default='out/train_log.csv')
+    ap.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
+    ap.add_argument('--warmup_steps', type=int, default=100, help='Number of warmup steps')
+    ap.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'linear', 'constant'])
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -95,12 +99,28 @@ def main():
     opt = AdamW(model.parameters(), lr=args.lr)
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
+    # Create learning rate scheduler
+    if args.lr_schedule == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=args.steps, eta_min=args.lr * 0.1
+        )
+    elif args.lr_schedule == 'linear':
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            opt, start_factor=0.1, end_factor=1.0, total_iters=args.warmup_steps
+        )
+    else:  # constant
+        scheduler = None
+
     best = 1e9
+
+    # Helper function to get current learning rate
+    def get_lr():
+        return opt.param_groups[0]['lr']
 
     # CSV logger
     with open(args.log_csv, 'w', newline='') as fcsv:
         writer = csv.writer(fcsv)
-        writer.writerow(['step','train_loss','val_loss'])
+        writer.writerow(['step','train_loss','val_loss','lr'])
 
         step = 0
         train_iter = iter(train_dl)
@@ -116,7 +136,16 @@ def main():
             loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
             opt.zero_grad(set_to_none=True)
             loss.backward()
+
+            # Gradient clipping
+            if args.grad_clip > 0:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
             opt.step()
+
+            # Update learning rate
+            if scheduler is not None:
+                scheduler.step()
 
             val_loss = ''
             if step % 100 == 0:
@@ -134,8 +163,9 @@ def main():
                             'vocab_size': tok.get_vocab_size(),
                         }
                     }, 'out/best.pt')
-            writer.writerow([step, float(loss.item()), ('' if val_loss=='' else float(val_loss))])
+            writer.writerow([step, float(loss.item()), ('' if val_loss=='' else float(val_loss)), get_lr()])
             step += 1
+            pbar.set_description(f'Loss: {loss.item():.3f}, LR: {get_lr():.2e}')
             pbar.update(1)
         pbar.close()
 
