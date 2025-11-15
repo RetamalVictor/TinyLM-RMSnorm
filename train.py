@@ -77,14 +77,37 @@ def main():
         train_path = 'data/tinyshakespeare_train.txt'
         val_path   = 'data/tinyshakespeare_val.txt'
 
+    # Check if data files exist
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(
+            f"Training data not found at {train_path}. "
+            f"Please run 'python data/prepare_{args.data}.py' first."
+        )
+    if not os.path.exists(val_path):
+        raise FileNotFoundError(
+            f"Validation data not found at {val_path}. "
+            f"Please run 'python data/prepare_{args.data}.py' first."
+        )
+
     os.makedirs('out', exist_ok=True)
 
-    if not os.path.exists('tokenizer.json'):
-        build_tokenizer([train_path, val_path], 'tokenizer.json')
-    tok = Tokenizer.from_file('tokenizer.json')
+    # Build or load tokenizer
+    try:
+        if not os.path.exists('tokenizer.json'):
+            print("Building tokenizer...")
+            build_tokenizer([train_path, val_path], 'tokenizer.json')
+        tok = Tokenizer.from_file('tokenizer.json')
+    except Exception as e:
+        raise RuntimeError(f"Failed to build/load tokenizer: {e}")
 
-    with open(train_path, 'r', encoding='utf-8') as f: train_text = f.read()
-    with open(val_path, 'r', encoding='utf-8') as f: val_text = f.read()
+    # Load data files
+    try:
+        with open(train_path, 'r', encoding='utf-8') as f:
+            train_text = f.read()
+        with open(val_path, 'r', encoding='utf-8') as f:
+            val_text = f.read()
+    except Exception as e:
+        raise RuntimeError(f"Failed to read data files: {e}")
 
     train_ds = CharDataset(train_text, args.seq_len, tok)
     val_ds   = CharDataset(val_text, args.seq_len, tok)
@@ -127,25 +150,37 @@ def main():
         pbar = tqdm(total=args.steps)
         while step < args.steps:
             try:
-                x, y = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_dl)
-                x, y = next(train_iter)
-            x, y = x.to(device), y.to(device)
-            logits = model(x, sin, cos)
-            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
+                try:
+                    x, y = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_dl)
+                    x, y = next(train_iter)
+                x, y = x.to(device), y.to(device)
 
-            # Gradient clipping
-            if args.grad_clip > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Forward pass with OOM handling
+                logits = model(x, sin, cos)
+                loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                opt.zero_grad(set_to_none=True)
+                loss.backward()
 
-            opt.step()
+                # Gradient clipping
+                if args.grad_clip > 0:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
 
-            # Update learning rate
-            if scheduler is not None:
-                scheduler.step()
+                opt.step()
+
+                # Update learning rate
+                if scheduler is not None:
+                    scheduler.step()
+
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    print(f"\n[Warning] OOM at step {step}. Clearing cache and skipping batch.")
+                    opt.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
 
             val_loss = ''
             if step % 100 == 0:

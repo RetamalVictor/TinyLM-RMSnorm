@@ -1,4 +1,4 @@
-import argparse, torch, random
+import argparse, torch, random, os
 from model import TinyLM, build_sincos, prealloc_kvcache
 from tokenizers import Tokenizer
 
@@ -70,7 +70,19 @@ def main():
     ap.add_argument('--stream', action='store_true')
     args = ap.parse_args()
 
-    ckpt = torch.load(args.ckpt, map_location='cpu')
+    # Load checkpoint with error handling
+    if not os.path.exists(args.ckpt):
+        raise FileNotFoundError(f"Checkpoint not found: {args.ckpt}")
+
+    try:
+        ckpt = torch.load(args.ckpt, map_location='cpu')
+    except Exception as e:
+        raise RuntimeError(f"Failed to load checkpoint: {e}")
+
+    # Load tokenizer
+    if 'tok' not in ckpt:
+        raise ValueError("Checkpoint missing tokenizer. Please retrain the model.")
+
     tok = Tokenizer.from_str(ckpt['tok'])
 
     cfg = ckpt.get('config', None)
