@@ -19,7 +19,20 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import rmsnorm_cuda
+# Try to import CUDA module, fallback to CPU implementation if not available
+try:
+    import rmsnorm_cuda
+    HAS_CUDA_KERNEL = True
+except ImportError:
+    HAS_CUDA_KERNEL = False
+    # Create a warning for users
+    import warnings
+    warnings.warn(
+        "CUDA RMSNorm kernel not found. Falling back to PyTorch implementation. "
+        "To enable CUDA kernel, run: python setup_cuda.py build_ext --inplace",
+        RuntimeWarning,
+        stacklevel=2
+    )
 
 
 class RMSNormCUDAFn(torch.autograd.Function):
@@ -42,6 +55,8 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Normalized tensor of same shape as input
         """
+        if not HAS_CUDA_KERNEL:
+            raise RuntimeError("CUDA RMSNorm module not available")
         y, inv_rms = rmsnorm_cuda.forward(x, weight, eps)
         ctx.save_for_backward(x, weight, inv_rms)
         ctx.eps = eps
@@ -58,17 +73,24 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Tuple of (dx, dweight, deps) where deps is None (non-differentiable)
         """
+        if not HAS_CUDA_KERNEL:
+            raise RuntimeError("CUDA RMSNorm module not available")
         x, weight, inv_rms = ctx.saved_tensors
         dx, dw = rmsnorm_cuda.backward(dy.contiguous(), x, weight, inv_rms, ctx.eps)
         return dx, dw, None
 
 
 class RMSNormCUDA(nn.Module):
-    """CUDA-accelerated Root Mean Square Layer Normalization.
+    """Root Mean Square Layer Normalization with optional CUDA acceleration.
 
     RMSNorm is a simplification of LayerNorm that normalizes by RMS statistics
     without mean centering, reducing computational cost while maintaining
     comparable performance.
+
+    This implementation automatically uses the custom CUDA kernel when available
+    and running on GPU, otherwise falls back to a PyTorch native implementation.
+    This design allows the model to be portable across different environments
+    while maintaining optimal performance when CUDA kernels are available.
 
     Attributes:
         weight: Learnable scale parameters
@@ -95,7 +117,12 @@ class RMSNormCUDA(nn.Module):
         Returns:
             Normalized tensor of same shape
         """
-        return RMSNormCUDAFn.apply(x, self.weight, self.eps)
+        if HAS_CUDA_KERNEL and x.is_cuda:
+            return RMSNormCUDAFn.apply(x, self.weight, self.eps)
+        else:
+            # PyTorch native implementation (works on both CPU and GPU)
+            rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+            return x * rms * self.weight
 
 
 def rotary_embeddings(
@@ -160,12 +187,13 @@ class MHA(nn.Module):
         proj: Output projection
     """
 
-    def __init__(self, dim: int, n_heads: int):
+    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
         """Initialize Multi-Head Attention layer.
 
         Args:
             dim: Model dimension (must be divisible by n_heads)
             n_heads: Number of attention heads
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         assert dim % n_heads == 0, f"dim {dim} must be divisible by n_heads {n_heads}"
@@ -173,6 +201,7 @@ class MHA(nn.Module):
         self.dim = dim
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.proj = nn.Linear(dim, dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -221,7 +250,8 @@ class MHA(nn.Module):
 
         # Reshape and project output
         y = attn.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(y)
+        y = self.proj(y)
+        return self.dropout(y)
 
 
 class Block(nn.Module):
@@ -238,22 +268,25 @@ class Block(nn.Module):
         mlp: Feed-forward network with SiLU activation
     """
 
-    def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 4):
+    def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 4, dropout: float = 0.0):
         """Initialize transformer block.
 
         Args:
             dim: Model dimension
             n_heads: Number of attention heads
             mlp_ratio: MLP hidden dimension ratio (hidden_dim = dim * mlp_ratio)
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         self.norm1 = RMSNormCUDA(dim)
-        self.attn = MHA(dim, n_heads)
+        self.attn = MHA(dim, n_heads, dropout=dropout)
         self.norm2 = RMSNormCUDA(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_ratio*dim, bias=False),
             nn.SiLU(),
+            nn.Dropout(dropout),
             nn.Linear(mlp_ratio*dim, dim, bias=False),
+            nn.Dropout(dropout)
         )
 
     def forward(
@@ -307,7 +340,8 @@ class TinyLM(nn.Module):
         vocab_size: int,
         dim: int = 384,
         n_layers: int = 6,
-        n_heads: int = 6
+        n_heads: int = 6,
+        dropout: float = 0.0
     ):
         """Initialize TinyLM model.
 
@@ -316,14 +350,17 @@ class TinyLM(nn.Module):
             dim: Model dimension (default: 384)
             n_layers: Number of transformer blocks (default: 6)
             n_heads: Number of attention heads (default: 6)
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         self.tok = nn.Embedding(vocab_size, dim)
-        self.blocks = nn.ModuleList([Block(dim, n_heads) for _ in range(n_layers)])
+        self.tok_dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([Block(dim, n_heads, dropout=dropout) for _ in range(n_layers)])
         self.norm = RMSNormCUDA(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
         self.dim = dim
         self.n_heads = n_heads
+        self.dropout = dropout
 
     def forward(
         self,
@@ -346,6 +383,7 @@ class TinyLM(nn.Module):
             Logits tensor of shape [batch_size, seq_len, vocab_size]
         """
         x = self.tok(idx)
+        x = self.tok_dropout(x)
         for blk in self.blocks:
             x = blk(x, sin, cos, cache, start_pos)
         x = self.norm(x)

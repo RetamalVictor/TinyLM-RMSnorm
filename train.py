@@ -2,6 +2,7 @@ import argparse, os, csv
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
+import torch.optim.lr_scheduler
 from torch.utils.data import DataLoader
 from datasets import load_dataset
 from tokenizers import Tokenizer
@@ -38,17 +39,25 @@ def build_tokenizer(corpus_paths, out_path):
     return tok
 
 @torch.no_grad()
-def evaluate(model, dl, sin, cos, device):
+def evaluate(model, dl, sin, cos, device, use_amp=False):
     model.eval()
     loss_sum = 0
     n = 0
     for x, y in dl:
         x, y = x.to(device), y.to(device)
-        logits = model(x, sin, cos)
-        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-        loss_sum += loss.item(); n += 1
+        if use_amp and device == 'cuda':
+            with torch.cuda.amp.autocast():
+                logits = model(x, sin, cos)
+                loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        else:
+            logits = model(x, sin, cos)
+            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+        loss_sum += loss.item()
+        n += 1
     model.train()
-    return loss_sum / max(1, n)
+    avg_loss = loss_sum / max(1, n)
+    perplexity = torch.exp(torch.tensor(avg_loss)).item()
+    return avg_loss, perplexity
 
 def main():
     ap = argparse.ArgumentParser()
@@ -62,6 +71,13 @@ def main():
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--compile', action='store_true')
     ap.add_argument('--log_csv', type=str, default='out/train_log.csv')
+    ap.add_argument('--grad_clip', type=float, default=1.0, help='Gradient clipping value')
+    ap.add_argument('--warmup_steps', type=int, default=100, help='Number of warmup steps')
+    ap.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'linear', 'constant'])
+    ap.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training (FP16)')
+    ap.add_argument('--fp16_scale_window', type=int, default=1000, help='Loss scale update frequency')
+    ap.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient accumulation steps')
+    ap.add_argument('--dropout', type=float, default=0.1, help='Dropout probability for regularization')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -73,14 +89,37 @@ def main():
         train_path = 'data/tinyshakespeare_train.txt'
         val_path   = 'data/tinyshakespeare_val.txt'
 
+    # Check if data files exist
+    if not os.path.exists(train_path):
+        raise FileNotFoundError(
+            f"Training data not found at {train_path}. "
+            f"Please run 'python data/prepare_{args.data}.py' first."
+        )
+    if not os.path.exists(val_path):
+        raise FileNotFoundError(
+            f"Validation data not found at {val_path}. "
+            f"Please run 'python data/prepare_{args.data}.py' first."
+        )
+
     os.makedirs('out', exist_ok=True)
 
-    if not os.path.exists('tokenizer.json'):
-        build_tokenizer([train_path, val_path], 'tokenizer.json')
-    tok = Tokenizer.from_file('tokenizer.json')
+    # Build or load tokenizer
+    try:
+        if not os.path.exists('tokenizer.json'):
+            print("Building tokenizer...")
+            build_tokenizer([train_path, val_path], 'tokenizer.json')
+        tok = Tokenizer.from_file('tokenizer.json')
+    except Exception as e:
+        raise RuntimeError(f"Failed to build/load tokenizer: {e}")
 
-    with open(train_path, 'r', encoding='utf-8') as f: train_text = f.read()
-    with open(val_path, 'r', encoding='utf-8') as f: val_text = f.read()
+    # Load data files
+    try:
+        with open(train_path, 'r', encoding='utf-8') as f:
+            train_text = f.read()
+        with open(val_path, 'r', encoding='utf-8') as f:
+            val_text = f.read()
+    except Exception as e:
+        raise RuntimeError(f"Failed to read data files: {e}")
 
     train_ds = CharDataset(train_text, args.seq_len, tok)
     val_ds   = CharDataset(val_text, args.seq_len, tok)
@@ -88,56 +127,171 @@ def main():
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
     val_dl   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True)
 
-    model = TinyLM(vocab_size=tok.get_vocab_size(), dim=args.dim, n_layers=args.n_layers, n_heads=args.n_heads).to(device)
+    model = TinyLM(
+        vocab_size=tok.get_vocab_size(),
+        dim=args.dim,
+        n_layers=args.n_layers,
+        n_heads=args.n_heads,
+        dropout=args.dropout
+    ).to(device)
     if args.compile and hasattr(torch, 'compile'):
         model = torch.compile(model)
 
     opt = AdamW(model.parameters(), lr=args.lr)
     sin, cos = build_sincos(4096, model.dim // model.n_heads, device)
 
+    # Create gradient scaler for mixed precision
+    scaler = torch.cuda.amp.GradScaler(enabled=args.mixed_precision) if device == 'cuda' else None
+
+    # Create learning rate scheduler
+    if args.lr_schedule == 'cosine':
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            opt, T_max=args.steps, eta_min=args.lr * 0.1
+        )
+    elif args.lr_schedule == 'linear':
+        scheduler = torch.optim.lr_scheduler.LinearLR(
+            opt, start_factor=0.1, end_factor=1.0, total_iters=args.warmup_steps
+        )
+    else:  # constant
+        scheduler = None
+
     best = 1e9
+
+    # Helper function to get current learning rate
+    def get_lr():
+        return opt.param_groups[0]['lr']
 
     # CSV logger
     with open(args.log_csv, 'w', newline='') as fcsv:
         writer = csv.writer(fcsv)
-        writer.writerow(['step','train_loss','val_loss'])
+        writer.writerow(['step','train_loss','train_ppl','val_loss','val_ppl','lr'])
 
         step = 0
         train_iter = iter(train_dl)
         pbar = tqdm(total=args.steps)
+        accum_loss = 0.0  # Track loss for gradient accumulation
+
         while step < args.steps:
             try:
-                x, y = next(train_iter)
-            except StopIteration:
-                train_iter = iter(train_dl)
-                x, y = next(train_iter)
-            x, y = x.to(device), y.to(device)
-            logits = model(x, sin, cos)
-            loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
+                try:
+                    x, y = next(train_iter)
+                except StopIteration:
+                    train_iter = iter(train_dl)
+                    x, y = next(train_iter)
+                x, y = x.to(device), y.to(device)
 
-            val_loss = ''
-            if step % 100 == 0:
-                val_loss = evaluate(model, val_dl, sin, cos, device)
-                if val_loss < best:
-                    best = val_loss
-                    base = getattr(model, "_orig_mod", model)
-                    torch.save({
-                        'model': base.state_dict(),
-                        'tok': tok.to_str(),
-                        'config': {
-                            'dim': base.dim,
-                            'n_layers': len(base.blocks),
-                            'n_heads': base.n_heads,
-                            'vocab_size': tok.get_vocab_size(),
-                        }
-                    }, 'out/best.pt')
-            writer.writerow([step, float(loss.item()), ('' if val_loss=='' else float(val_loss))])
+                # Zero gradients only at the start of accumulation
+                if step % args.grad_accum_steps == 0:
+                    opt.zero_grad(set_to_none=True)
+
+                # Forward pass with mixed precision
+                if args.mixed_precision and scaler is not None:
+                    # Mixed precision training
+                    with torch.cuda.amp.autocast():
+                        logits = model(x, sin, cos)
+                        loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        # Scale loss for gradient accumulation
+                        loss = loss / args.grad_accum_steps
+
+                    # Backward pass with gradient scaling
+                    scaler.scale(loss).backward()
+                else:
+                    # Standard training
+                    logits = model(x, sin, cos)
+                    loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    # Scale loss for gradient accumulation
+                    loss = loss / args.grad_accum_steps
+                    loss.backward()
+
+                # Accumulate loss for logging (unscaled)
+                accum_loss += loss.item() * args.grad_accum_steps
+
+                # Update weights only after accumulation steps
+                if (step + 1) % args.grad_accum_steps == 0:
+                    if args.mixed_precision and scaler is not None:
+                        # Unscale gradients for clipping
+                        scaler.unscale_(opt)
+
+                        # Gradient clipping
+                        if args.grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                        # Optimizer step with scaler
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        # Gradient clipping
+                        if args.grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                        opt.step()
+
+                    # Update learning rate
+                    if scheduler is not None:
+                        scheduler.step()
+
+                    # Use accumulated loss for logging
+                    current_loss = accum_loss / args.grad_accum_steps
+                    accum_loss = 0.0
+                else:
+                    # Don't log intermediate accumulation steps
+                    current_loss = None
+
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower():
+                    print(f"\n[Warning] OOM at step {step}. Clearing cache and skipping batch.")
+                    opt.zero_grad(set_to_none=True)
+                    torch.cuda.empty_cache()
+                    continue
+                else:
+                    raise e
+
+            # Only log after accumulation steps
+            if current_loss is not None:
+                # Calculate training perplexity
+                train_loss_val = current_loss
+                train_ppl = torch.exp(torch.tensor(train_loss_val)).item()
+
+                # Validation evaluation
+                val_loss = ''
+                val_ppl = ''
+                if step % 100 == 0 and (step + 1) % args.grad_accum_steps == 0:
+                    val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=args.mixed_precision)
+                    if val_loss < best:
+                        best = val_loss
+                        base = getattr(model, "_orig_mod", model)
+                        torch.save({
+                            'model': base.state_dict(),
+                            'tok': tok.to_str(),
+                            'config': {
+                                'dim': base.dim,
+                                'n_layers': len(base.blocks),
+                                'n_heads': base.n_heads,
+                                'vocab_size': tok.get_vocab_size(),
+                            }
+                        }, 'out/best.pt')
+                        print(f"\n[Step {step}] New best validation loss: {val_loss:.3f} (PPL: {val_ppl:.1f})")
+
+                if (step + 1) % args.grad_accum_steps == 0:
+                    writer.writerow([
+                        step,
+                        float(train_loss_val),
+                        float(train_ppl),
+                        ('' if val_loss=='' else float(val_loss)),
+                        ('' if val_ppl=='' else float(val_ppl)),
+                        get_lr()
+                    ])
+
+                pbar.set_description(f'Loss: {train_loss_val:.3f} (PPL: {train_ppl:.1f}), LR: {get_lr():.2e}')
+
             step += 1
             pbar.update(1)
         pbar.close()
+
+        # Final summary
+        print(f"\nTraining completed!")
+        print(f"Best validation loss: {best:.3f} (PPL: {torch.exp(torch.tensor(best)).item():.1f})")
+        print(f"Model saved to: out/best.pt")
 
 if __name__ == '__main__':
     main()
