@@ -51,17 +51,23 @@ def with_kv():
 
 def no_kv():
     ids = ids0.clone()
-    # recompute over the full prefix each step (no reuse)
+    # recompute over the full prefix each step (no cache reuse)
+    # warmup
     for _ in range(5):
-        cache = prealloc_kvcache(1, ids.size(1)+1, cfg['n_heads'], dhead, 'cuda', dtype)
-        logits = m(ids, sin, cos, cache, start_pos=0)[:, -1, :]
+        # Process entire sequence without cache (cache=None means no caching)
+        logits = m(ids, sin, cos, cache=None, start_pos=0)[:, -1, :]
         ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    torch.cuda.synchronize(); t0=time.time()
+
+    torch.cuda.synchronize()
+    t0 = time.time()
+
+    # Actual measurement - process full sequence from scratch each time
     for _ in range(args.steps):
-        cache = prealloc_kvcache(1, ids.size(1)+1, cfg['n_heads'], dhead, 'cuda', dtype)
-        logits = m(ids, sin, cos, cache, start_pos=0)[:, -1, :]
+        logits = m(ids, sin, cos, cache=None, start_pos=0)[:, -1, :]
         ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    torch.cuda.synchronize(); t1=time.time()
+
+    torch.cuda.synchronize()
+    t1 = time.time()
     return args.steps/(t1-t0)
 
 os.makedirs('out', exist_ok=True)
