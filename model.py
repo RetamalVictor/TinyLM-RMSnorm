@@ -22,9 +22,17 @@ import torch.nn.functional as F
 # Try to import CUDA module, fallback to CPU implementation if not available
 try:
     import rmsnorm_cuda
-    CUDA_AVAILABLE = True
+    HAS_CUDA_KERNEL = True
 except ImportError:
-    CUDA_AVAILABLE = False
+    HAS_CUDA_KERNEL = False
+    # Create a warning for users
+    import warnings
+    warnings.warn(
+        "CUDA RMSNorm kernel not found. Falling back to PyTorch implementation. "
+        "To enable CUDA kernel, run: python setup_cuda.py build_ext --inplace",
+        RuntimeWarning,
+        stacklevel=2
+    )
 
 
 class RMSNormCUDAFn(torch.autograd.Function):
@@ -47,7 +55,7 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Normalized tensor of same shape as input
         """
-        if not CUDA_AVAILABLE:
+        if not HAS_CUDA_KERNEL:
             raise RuntimeError("CUDA RMSNorm module not available")
         y, inv_rms = rmsnorm_cuda.forward(x, weight, eps)
         ctx.save_for_backward(x, weight, inv_rms)
@@ -65,7 +73,7 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Tuple of (dx, dweight, deps) where deps is None (non-differentiable)
         """
-        if not CUDA_AVAILABLE:
+        if not HAS_CUDA_KERNEL:
             raise RuntimeError("CUDA RMSNorm module not available")
         x, weight, inv_rms = ctx.saved_tensors
         dx, dw = rmsnorm_cuda.backward(dy.contiguous(), x, weight, inv_rms, ctx.eps)
@@ -73,11 +81,16 @@ class RMSNormCUDAFn(torch.autograd.Function):
 
 
 class RMSNormCUDA(nn.Module):
-    """CUDA-accelerated Root Mean Square Layer Normalization.
+    """Root Mean Square Layer Normalization with optional CUDA acceleration.
 
     RMSNorm is a simplification of LayerNorm that normalizes by RMS statistics
     without mean centering, reducing computational cost while maintaining
     comparable performance.
+
+    This implementation automatically uses the custom CUDA kernel when available
+    and running on GPU, otherwise falls back to a PyTorch native implementation.
+    This design allows the model to be portable across different environments
+    while maintaining optimal performance when CUDA kernels are available.
 
     Attributes:
         weight: Learnable scale parameters
@@ -104,10 +117,10 @@ class RMSNormCUDA(nn.Module):
         Returns:
             Normalized tensor of same shape
         """
-        if CUDA_AVAILABLE and x.is_cuda:
+        if HAS_CUDA_KERNEL and x.is_cuda:
             return RMSNormCUDAFn.apply(x, self.weight, self.eps)
         else:
-            # CPU fallback implementation
+            # PyTorch native implementation (works on both CPU and GPU)
             rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
             return x * rms * self.weight
 
