@@ -160,12 +160,13 @@ class MHA(nn.Module):
         proj: Output projection
     """
 
-    def __init__(self, dim: int, n_heads: int):
+    def __init__(self, dim: int, n_heads: int, dropout: float = 0.0):
         """Initialize Multi-Head Attention layer.
 
         Args:
             dim: Model dimension (must be divisible by n_heads)
             n_heads: Number of attention heads
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         assert dim % n_heads == 0, f"dim {dim} must be divisible by n_heads {n_heads}"
@@ -173,6 +174,7 @@ class MHA(nn.Module):
         self.dim = dim
         self.qkv = nn.Linear(dim, dim * 3, bias=False)
         self.proj = nn.Linear(dim, dim, bias=False)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(
         self,
@@ -221,7 +223,8 @@ class MHA(nn.Module):
 
         # Reshape and project output
         y = attn.transpose(1, 2).contiguous().view(B, T, C)
-        return self.proj(y)
+        y = self.proj(y)
+        return self.dropout(y)
 
 
 class Block(nn.Module):
@@ -238,22 +241,25 @@ class Block(nn.Module):
         mlp: Feed-forward network with SiLU activation
     """
 
-    def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 4):
+    def __init__(self, dim: int, n_heads: int, mlp_ratio: int = 4, dropout: float = 0.0):
         """Initialize transformer block.
 
         Args:
             dim: Model dimension
             n_heads: Number of attention heads
             mlp_ratio: MLP hidden dimension ratio (hidden_dim = dim * mlp_ratio)
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         self.norm1 = RMSNormCUDA(dim)
-        self.attn = MHA(dim, n_heads)
+        self.attn = MHA(dim, n_heads, dropout=dropout)
         self.norm2 = RMSNormCUDA(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, mlp_ratio*dim, bias=False),
             nn.SiLU(),
+            nn.Dropout(dropout),
             nn.Linear(mlp_ratio*dim, dim, bias=False),
+            nn.Dropout(dropout)
         )
 
     def forward(
@@ -307,7 +313,8 @@ class TinyLM(nn.Module):
         vocab_size: int,
         dim: int = 384,
         n_layers: int = 6,
-        n_heads: int = 6
+        n_heads: int = 6,
+        dropout: float = 0.0
     ):
         """Initialize TinyLM model.
 
@@ -316,14 +323,17 @@ class TinyLM(nn.Module):
             dim: Model dimension (default: 384)
             n_layers: Number of transformer blocks (default: 6)
             n_heads: Number of attention heads (default: 6)
+            dropout: Dropout probability (default: 0.0)
         """
         super().__init__()
         self.tok = nn.Embedding(vocab_size, dim)
-        self.blocks = nn.ModuleList([Block(dim, n_heads) for _ in range(n_layers)])
+        self.tok_dropout = nn.Dropout(dropout)
+        self.blocks = nn.ModuleList([Block(dim, n_heads, dropout=dropout) for _ in range(n_layers)])
         self.norm = RMSNormCUDA(dim)
         self.head = nn.Linear(dim, vocab_size, bias=False)
         self.dim = dim
         self.n_heads = n_heads
+        self.dropout = dropout
 
     def forward(
         self,
@@ -346,6 +356,7 @@ class TinyLM(nn.Module):
             Logits tensor of shape [batch_size, seq_len, vocab_size]
         """
         x = self.tok(idx)
+        x = self.tok_dropout(x)
         for blk in self.blocks:
             x = blk(x, sin, cos, cache, start_pos)
         x = self.norm(x)

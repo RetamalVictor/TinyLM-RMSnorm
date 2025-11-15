@@ -77,6 +77,7 @@ def main():
     ap.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training (FP16)')
     ap.add_argument('--fp16_scale_window', type=int, default=1000, help='Loss scale update frequency')
     ap.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient accumulation steps')
+    ap.add_argument('--dropout', type=float, default=0.1, help='Dropout probability for regularization')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -126,7 +127,13 @@ def main():
     train_dl = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, drop_last=True)
     val_dl   = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, drop_last=True)
 
-    model = TinyLM(vocab_size=tok.get_vocab_size(), dim=args.dim, n_layers=args.n_layers, n_heads=args.n_heads).to(device)
+    model = TinyLM(
+        vocab_size=tok.get_vocab_size(),
+        dim=args.dim,
+        n_layers=args.n_layers,
+        n_heads=args.n_heads,
+        dropout=args.dropout
+    ).to(device)
     if args.compile and hasattr(torch, 'compile'):
         model = torch.compile(model)
 
