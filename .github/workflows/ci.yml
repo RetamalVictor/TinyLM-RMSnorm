@@ -98,7 +98,7 @@ jobs:
           echo "CUDA extension build requires GPU environment - skipping in CI"
 
       - name: Upload build artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: cuda-extension
           path: |
@@ -116,7 +116,7 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Download CUDA extension
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: cuda-extension
 
@@ -171,7 +171,7 @@ jobs:
       - uses: actions/checkout@v3
 
       - name: Download CUDA extension
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
         with:
           name: cuda-extension
 
@@ -185,7 +185,7 @@ jobs:
           OUTDIR=benchmark_results DO_TRAIN=0 bash scripts/run_all.sh
 
       - name: Upload benchmark results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: benchmark-results
           path: benchmark_results/
