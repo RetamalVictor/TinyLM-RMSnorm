@@ -1,14 +1,15 @@
-# TinyLM + CUDA RMSNorm + KV-Cache Ablations
+# TinyLM with Custom CUDA RMSNorm
 
-TinyLM is a bite-size project to demonstrate end-to-end LM engineering: a compact Transformer, a **fused CUDA RMSNorm** kernel, and **decode-time KV-cache** benchmarks/ablations. It’s designed to run on a laptop 2070 Mobile, and scale to a 4090 for larger sweeps.
+A compact transformer implementation featuring custom CUDA kernels for RMSNorm and comprehensive performance benchmarking. Built to demonstrate ML engineering skills from low-level optimization to full training pipelines.
 
-## Why this exists
+## Project Overview
 
-* **Training, fast:** a minimal GPT-style TinyLM you can train on TinyShakespeare/TinyStories.
-* **Kernel work:** RMSNorm fused in CUDA, compiled as a PyTorch extension, unit-tested and micro-benchmarked.
-* **Inference realism:** decode microbench + ablations that isolate the KV-cache effect across context length.
+This repository implements a small-scale GPT-style language model with several performance optimizations:
 
----
+- **Custom CUDA kernel** for fused RMSNorm (forward + backward passes)
+- **KV-cache implementation** for efficient autoregressive generation
+- **Comprehensive benchmarking suite** measuring throughput, memory usage, and speedups
+- **End-to-end training pipeline** with tokenizer training and mixed precision support
 
 ## Results (plots + raw CSV)
 
@@ -17,21 +18,31 @@ All artifacts live in [`plots/`](plots/). PNGs are accompanied by CSVs for repro
 ### 1) KV-cache throughput vs context length
 
 Left: tokens/sec with and without KV. Right: speedup× (KV / no-KV).
-The trend is the point: **with-KV stays \~flat** as context grows, while **no-KV collapses** (recomputes QK over the whole prefix).
+The trend is the point: **with-KV stays ~flat** as context grows, while **no-KV collapses** (recomputes QK over the whole prefix).
 
 ![KV curve panels](plots/fig_kv_curve_panels.png)
 
-* Raw data: [`plots/kv_curve.csv`](plots/kv_curve.csv)
+Based on actual measurements from [`plots/kv_curve.csv`](plots/kv_curve.csv):
+
+| Context Length | Without KV-Cache (tok/s) | With KV-Cache (tok/s) | Speedup |
+|---------------|-------------------------|---------------------|---------|
+| 32 | 100.2 | 102.8 | 1.03× |
+| 64 | 99.4 | 117.9 | 1.19× |
+| 128 | 50.2 | 102.2 | 2.04× |
+| 256 | 20.9 | 101.9 | **4.88×** |
+
 * Single-length bar variant: [`plots/fig_kv_vs_nokv.png`](plots/fig_kv_vs_nokv.png), CSV [`plots/kv_vs_nokv.csv`](plots/kv_vs_nokv.csv)
 
-### 2) Fused RMSNorm micro-bench
+### 2) Fused RMSNorm performance
 
-Fused RMSNorm consistently outruns the reference PyTorch compose—especially at larger hidden sizes.
+The fused kernel implementation shows consistent performance improvements over the PyTorch reference.
 
 ![RMSNorm micro-bench](plots/fig_rmsnorm.png)
 
-* Raw data: [`plots/rmsnorm_bench.csv`](plots/rmsnorm_bench.csv)
-* Optional speedup plot: [`plots/fig_rmsnorm_speedup.png`](plots/fig_rmsnorm_speedup.png) if generated
+* End-to-end decode ablation (from [`plots/ablation_rmsnorm.csv`](plots/ablation_rmsnorm.csv)):
+  - Reference: 11.86 ms/token
+  - Fused: 10.00 ms/token
+  - **18.6% improvement** in real generation workload
 
 ### 3) KV-cache VRAM vs sequence length
 
@@ -39,27 +50,39 @@ Memory grows linearly with the maximum context due to per-layer K/V tensors.
 
 ![VRAM vs seq](plots/fig_vram_seq.png)
 
-* Raw data: [`plots/vram_seq.csv`](plots/vram_seq.csv)
+* Raw data: [`plots/vram_seq.csv`](plots/vram_seq.csv) (if generated)
 
 ### 4) Training curve (TinyShakespeare)
 
-Loss curves from a short run—handy to sanity-check the training loop.
+Loss curves from a training run—demonstrates the model learns effectively.
 
-![`plots/fig_training_curve.png`](plots/fig_training_curve.png)
-* Raw log: [`plots/train_log.csv`](plots/train_log.csv)
+![Training curve](plots/fig_training_curve.png)
 
-> Note: end-to-end decode ablation for RMSNorm shows a **small but real** ms/token improvement (the kernel is a small slice of the total). See [`plots/fig_ablation.png`](plots/fig_ablation.png) and [`plots/ablation_rmsnorm.csv`](plots/ablation_rmsnorm.csv) if generated.
+* Raw log: [`plots/train_log.csv`](plots/train_log.csv) (if generated)
 
----
+## Technical Implementation
 
-## What’s inside (high level)
+### Architecture Details
 
-* **Model:** `model.py` implements a lean GPT block with RMSNorm, MHA with rotary embeddings (RoPE), and a simple MLP.
-* **CUDA kernel:** `kernels/rmsnorm_cuda.cu` + `kernels/rmsnorm_binding.cpp` compiled via `setup_cuda.py` into `rmsnorm_cuda.*.so`. Exposed as `RMSNormCUDA` and dropped into the model.
-* **Tokenizer:** trained on the dataset at runtime (BPE via `tokenizers`).
-* **Benches/plots:** in `scripts/` (see below). Figures/CSVs saved to `plots/`.
+**Model Configuration:**
+- 6 transformer blocks, 384 hidden dimension, 6 attention heads
+- Rotary Position Embeddings (RoPE) instead of learned positional encodings
+- RMSNorm instead of LayerNorm for reduced computational overhead
+- SiLU activation in feed-forward networks
+- No bias terms in linear projections (following modern LLM practices)
 
-### Math bits (super brief)
+**Custom CUDA RMSNorm:**
+- Fused forward kernel with block-wise reduction
+- Two-pass backward kernel with FP32 gradient accumulation
+- Thread-coalesced memory access patterns
+- Supports both FP16 and FP32 computation
+
+**KV-Cache Strategy:**
+- Pre-allocated cache tensors to avoid reallocation during generation
+- Incremental position-based updates
+- Reduces per-token complexity from O(T²) to O(T)
+
+### Math bits
 
 * **RMSNorm** (channel-wise, ε=1e-6):
 
@@ -67,56 +90,90 @@ Loss curves from a short run—handy to sanity-check the training loop.
 
   The fused kernel computes the per-token RMS + scale in one pass with coalesced loads/stores.
 
-* **KV-cache:** at step *t*, reuse K/V from steps `0..t-1` and compute attention with the **new** token only → per-step cost ≈ $O(n\_heads·d\_head·n\_layers)$, instead of recomputing O(T²).
+* **KV-cache:** at step *t*, reuse K/V from steps `0..t-1` and compute attention with the **new** token only → per-step cost ≈ O(n_heads·d_head·n_layers), instead of recomputing O(T²).
 
----
+## Repository Structure
 
-## Quickstart (Docker)
+```
+TinyLM-RMSnorm/
+├── model.py                  # Core transformer implementation with type hints
+├── train.py                  # Training loop with gradient accumulation
+├── infer.py                  # Generation with sampling strategies
+├── kernels/
+│   ├── rmsnorm_cuda.cu      # CUDA kernel implementation (195 lines)
+│   └── rmsnorm_binding.cpp  # PyBind11 wrapper (23 lines)
+├── setup_cuda.py            # CUDA extension build configuration
+├── tests/
+│   └── test_rmsnorm.py      # Kernel validation against reference
+├── scripts/
+│   ├── bench_*.py           # Individual benchmarks
+│   ├── plot_*.py            # Visualization scripts
+│   └── run_all.sh          # One-button benchmark suite
+├── data/
+│   └── prepare_*.py         # Dataset preprocessing
+├── plots/                   # Generated figures and CSV outputs
+├── docker-compose.yml       # Docker configuration
+└── requirements.txt         # Python dependencies
+```
 
-> Works on Linux/macOS and Windows (Docker Desktop) with an NVIDIA GPU + recent drivers. Confirm `nvidia-smi` works inside containers.
+## Quick Start
 
-### 0) Build & enter the dev container
+### Prerequisites
+- NVIDIA GPU with CUDA 12.1+
+- PyTorch 2.2+
+- Docker (recommended) or local Python environment
+
+### Docker Setup (Recommended)
 
 ```bash
+# Build and enter development container
 docker compose run --rm tinylm bash
-# or: docker compose -f docker-compose.yml -f compose.2070.yml run --rm tinylm bash
+
+# For RTX 2070 optimization
+docker compose -f docker-compose.yml -f compose.2070.yml run --rm tinylm bash
 ```
 
-### 1) Prepare data
+### Setup and Training
 
 ```bash
-# TinyShakespeare (fast)
-python data/prepare_tinyshakespeare.py
-# or TinyStories (bigger)
-# python data/prepare_tinystories.py
-```
-
-### 2) Build the CUDA extension
-
-```bash
+# 1. Build CUDA extension
 python setup_cuda.py build_ext --inplace
-pytest -q  # optional: validate RMSNorm forward/backward against reference
-```
+pytest -q  # Validate kernel correctness
 
-### 3) Train a tiny model (quick run)
+# 2. Prepare dataset
+python data/prepare_tinyshakespeare.py  # Quick start
+# python data/prepare_tinystories.py    # Larger dataset
 
-```bash
-# Saves best checkpoint to out/best.pt (or pass OUTDIR below to redirect to plots/)
-python train.py --data tinyshakespeare \
-  --steps 1500 --batch_size 8 --seq_len 192 \
-  --dim 384 --n_layers 6 --n_heads 6 --lr 3e-4 --compile \
+# 3. Train model
+python train.py \
+  --data tinyshakespeare \
+  --steps 1500 \
+  --batch_size 8 \
+  --seq_len 192 \
+  --dim 384 \
+  --n_layers 6 \
+  --n_heads 6 \
+  --lr 3e-4 \
+  --compile \
   --log_csv plots/train_log.csv
+
+# 4. Run inference
+python infer.py \
+  --ckpt out/best.pt \
+  --prompt "Once upon a time" \
+  --max_new_tokens 100 \
+  --temperature 0.8 \
+  --top_p 0.95
 ```
 
-### 4) One-button: run benches + make all figures
+### One-button: Run benchmarks + generate all plots
 
 ```bash
 # Put all artifacts into plots/
 OUTDIR=plots DO_TRAIN=0 bash scripts/run_all.sh
 ```
 
-This generates (at minimum):
-
+This generates:
 ```
 plots/
   fig_training_curve.(png|svg)   train_log.csv
@@ -127,59 +184,120 @@ plots/
   fig_kv_curve_panels.(png|svg)
   fig_vram_seq.(png|svg)         vram_seq.csv
   fig_tokens_sec.(png|svg)       decode_bench.csv
-  fig_ablation.(png|svg)         ablation_rmsnorm.csv   (if enabled)
+  fig_ablation.(png|svg)         ablation_rmsnorm.csv
 ```
 
-### 5) Inference sanity check
-
-```bash
-python infer.py --ckpt out/best.pt --prompt "Once upon a time" --max_new_tokens 80
-```
-
----
-
-## Scripts reference
+## Scripts Reference
 
 * **Training log → curve:** `scripts/plot_training_curve.py`
 * **RMSNorm microbench:** `scripts/bench_rmsnorm.py` → `scripts/plot_rmsnorm.py`
-* **Decode throughput (per GPU label):** `scripts/bench_decode_tps.py` → `scripts/plot_tokens_sec.py`
+* **Decode throughput:** `scripts/bench_decode_tps.py` → `scripts/plot_tokens_sec.py`
 * **KV vs no-KV (single length):** `scripts/bench_kv_vs_nokv.py` → `scripts/plot_kv_vs_nokv.py`
-* **KV vs no-KV (curve across lengths):**
-  `scripts/bench_kv_curve.py` → `scripts/plot_kv_curve.py` or `scripts/plot_kv_curve_panels.py`
+* **KV vs no-KV (curve):** `scripts/bench_kv_curve.py` → `scripts/plot_kv_curve_panels.py`
 * **VRAM vs seq length:** `scripts/vram_vs_seq.py` → `scripts/plot_vram_seq.py`
-* **End-to-end ablation (ref RMSNorm vs fused):** `scripts/ablation_end2end.py` → `scripts/plot_ablation.py`
+* **End-to-end ablation:** `scripts/ablation_end2end.py` → `scripts/plot_ablation.py`
 
-> All decode benches cast RoPE tables to the model dtype and **prefill** the cache before incremental steps (so KV results aren’t biased by setup cost).
+## Key Features Demonstrated
 
----
+### Low-Level Optimization
+- Custom CUDA kernel development with proper autograd integration
+- Memory-efficient implementations with coalesced access patterns
+- Mixed precision support (FP16/FP32)
+- Proper forward and backward pass implementation
 
-## Reproducing on a bigger GPU (4090)
+### ML Engineering
+- Complete training pipeline from tokenization to checkpointing
+- Efficient inference with KV-caching and batched generation
+- Comprehensive testing and validation against reference implementations
+- Reproducible benchmarking with CSV output
 
-Run the same commands, but label the device and optionally bump sizes:
+### Performance Analysis
+- Systematic benchmarking across different configurations
+- Clear visualization of performance trends
+- End-to-end performance validation (not just micro-benchmarks)
+
+## Implementation Highlights
+
+### CUDA Kernel Design (kernels/rmsnorm_cuda.cu)
+The fused kernel implements both forward and backward passes with optimizations for:
+- Block-wise parallel reduction for RMS computation
+- Coalesced memory access patterns
+- FP32 accumulation for numerical stability in gradients
+- Shared memory utilization for reduction operations
+
+### KV-Cache Integration (model.py)
+```python
+def forward(self, x, sin, cos, cache=None, start_pos=0):
+    # Incremental KV updates for O(1) per-token generation
+    if cache is not None:
+        cache['k'][:, :, start_pos:start_pos+T] = k
+        cache['v'][:, :, start_pos:start_pos+T] = v
+        k = cache['k'][:, :, :start_pos+T]
+        v = cache['v'][:, :, :start_pos+T]
+```
+
+### Training Features (train.py)
+- Mixed precision training with automatic loss scaling
+- Gradient accumulation for effective larger batch sizes
+- Cosine learning rate scheduling with warmup
+- Best checkpoint saving based on validation loss
+
+## Testing and Validation
 
 ```bash
+# Unit tests for CUDA kernels
+pytest tests/test_rmsnorm.py -v
+
+# Tests validate:
+# - Forward pass accuracy (atol=1e-4)
+# - Backward pass gradients (atol=1e-3)
+# - Numerical stability across dtypes
+```
+
+## Reproducing on Different Hardware
+
+Run the same commands with hardware-specific labels:
+
+```bash
+# For RTX 4090 or other GPUs
 LABEL=RTX4090 OUTDIR=plots DO_TRAIN=0 \
-DATASET=tinystories STEPS=4000 BATCH_SIZE=24 SEQ_LEN=512 DIM=768 LAYERS=12 HEADS=12 \
+DATASET=tinystories STEPS=4000 BATCH_SIZE=24 SEQ_LEN=512 \
+DIM=768 LAYERS=12 HEADS=12 \
 bash scripts/run_all.sh
 ```
 
-This appends a second line to the KV curves and a second bar in the decode throughput plot, making a nice “laptop vs desktop” contrast.
+This enables multi-GPU comparisons in the same plots.
 
----
+## References
 
-## Repo map (essentials)
+Key papers that informed this implementation:
 
-```
-.
-├─ model.py                 # TinyLM + RMSNormCUDA integration
-├─ kernels/
-│   ├─ rmsnorm_cuda.cu      # fused CUDA kernel
-│   └─ rmsnorm_binding.cpp  # PyBind11 binding
-├─ setup_cuda.py            # builds the extension
-├─ train.py, infer.py       # training & generation
-├─ data/prepare_*.py        # tiny datasets
-├─ scripts/                 # benches + plotters
-└─ plots/                   # figures + CSVs (outputs)
-```
+1. **RMSNorm**: Zhang & Sennrich (2019) - "Root Mean Square Layer Normalization" [arXiv:1910.07467](https://arxiv.org/abs/1910.07467)
+2. **RoPE**: Su et al. (2024) - "RoFormer: Enhanced Transformer with Rotary Position Embedding" [arXiv:2104.09864](https://arxiv.org/abs/2104.09864)
+3. **GPT Architecture**: Radford et al. (2019) - "Language Models are Unsupervised Multitask Learners"
+4. **LLaMA**: Touvron et al. (2023) - "LLaMA: Open and Efficient Foundation Language Models" [arXiv:2302.13971](https://arxiv.org/abs/2302.13971)
 
+## Hardware Requirements
 
+**Minimum:**
+- NVIDIA GPU with 4GB VRAM
+- CUDA Compute Capability 7.0+
+- 8GB System RAM
+
+**Recommended:**
+- NVIDIA RTX 2070 or better
+- 8GB+ VRAM for longer sequences
+- 16GB System RAM
+
+## Future Enhancements
+
+Potential areas for further development:
+- Flash Attention integration for additional speedups
+- Distributed training support for multi-GPU systems
+- Triton kernel implementation for better portability
+- INT8 quantization for deployment optimization
+- Continuous batching for production serving
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
