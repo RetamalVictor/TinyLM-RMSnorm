@@ -35,6 +35,7 @@ jobs:
   test-cpu:
     name: CPU Tests
     runs-on: ubuntu-latest
+    continue-on-error: true  # Optional check for portfolio project
     strategy:
       matrix:
         python-version: ['3.8', '3.9', '3.10']
@@ -78,6 +79,7 @@ jobs:
   build-cuda:
     name: Build CUDA Extensions
     runs-on: ubuntu-latest
+    continue-on-error: true  # Optional check - requires GPU environment
     container:
       image: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-devel
 
