@@ -19,7 +19,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-import rmsnorm_cuda
+# Try to import CUDA module, fallback to CPU implementation if not available
+try:
+    import rmsnorm_cuda
+    CUDA_AVAILABLE = True
+except ImportError:
+    CUDA_AVAILABLE = False
 
 
 class RMSNormCUDAFn(torch.autograd.Function):
@@ -42,6 +47,8 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Normalized tensor of same shape as input
         """
+        if not CUDA_AVAILABLE:
+            raise RuntimeError("CUDA RMSNorm module not available")
         y, inv_rms = rmsnorm_cuda.forward(x, weight, eps)
         ctx.save_for_backward(x, weight, inv_rms)
         ctx.eps = eps
@@ -58,6 +65,8 @@ class RMSNormCUDAFn(torch.autograd.Function):
         Returns:
             Tuple of (dx, dweight, deps) where deps is None (non-differentiable)
         """
+        if not CUDA_AVAILABLE:
+            raise RuntimeError("CUDA RMSNorm module not available")
         x, weight, inv_rms = ctx.saved_tensors
         dx, dw = rmsnorm_cuda.backward(dy.contiguous(), x, weight, inv_rms, ctx.eps)
         return dx, dw, None
@@ -95,7 +104,12 @@ class RMSNormCUDA(nn.Module):
         Returns:
             Normalized tensor of same shape
         """
-        return RMSNormCUDAFn.apply(x, self.weight, self.eps)
+        if CUDA_AVAILABLE and x.is_cuda:
+            return RMSNormCUDAFn.apply(x, self.weight, self.eps)
+        else:
+            # CPU fallback implementation
+            rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
+            return x * rms * self.weight
 
 
 def rotary_embeddings(
