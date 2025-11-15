@@ -76,6 +76,7 @@ def main():
     ap.add_argument('--lr_schedule', type=str, default='cosine', choices=['cosine', 'linear', 'constant'])
     ap.add_argument('--mixed_precision', action='store_true', help='Use mixed precision training (FP16)')
     ap.add_argument('--fp16_scale_window', type=int, default=1000, help='Loss scale update frequency')
+    ap.add_argument('--grad_accum_steps', type=int, default=1, help='Gradient accumulation steps')
     args = ap.parse_args()
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -161,6 +162,8 @@ def main():
         step = 0
         train_iter = iter(train_dl)
         pbar = tqdm(total=args.steps)
+        accum_loss = 0.0  # Track loss for gradient accumulation
+
         while step < args.steps:
             try:
                 try:
@@ -170,43 +173,62 @@ def main():
                     x, y = next(train_iter)
                 x, y = x.to(device), y.to(device)
 
-                # Forward pass with mixed precision
-                opt.zero_grad(set_to_none=True)
+                # Zero gradients only at the start of accumulation
+                if step % args.grad_accum_steps == 0:
+                    opt.zero_grad(set_to_none=True)
 
+                # Forward pass with mixed precision
                 if args.mixed_precision and scaler is not None:
                     # Mixed precision training
                     with torch.cuda.amp.autocast():
                         logits = model(x, sin, cos)
                         loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                        # Scale loss for gradient accumulation
+                        loss = loss / args.grad_accum_steps
 
                     # Backward pass with gradient scaling
                     scaler.scale(loss).backward()
-
-                    # Unscale gradients for clipping
-                    scaler.unscale_(opt)
-
-                    # Gradient clipping
-                    if args.grad_clip > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
-
-                    # Optimizer step with scaler
-                    scaler.step(opt)
-                    scaler.update()
                 else:
                     # Standard training
                     logits = model(x, sin, cos)
                     loss = nn.functional.cross_entropy(logits.view(-1, logits.size(-1)), y.view(-1))
+                    # Scale loss for gradient accumulation
+                    loss = loss / args.grad_accum_steps
                     loss.backward()
 
-                    # Gradient clipping
-                    if args.grad_clip > 0:
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+                # Accumulate loss for logging (unscaled)
+                accum_loss += loss.item() * args.grad_accum_steps
 
-                    opt.step()
+                # Update weights only after accumulation steps
+                if (step + 1) % args.grad_accum_steps == 0:
+                    if args.mixed_precision and scaler is not None:
+                        # Unscale gradients for clipping
+                        scaler.unscale_(opt)
 
-                # Update learning rate
-                if scheduler is not None:
-                    scheduler.step()
+                        # Gradient clipping
+                        if args.grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                        # Optimizer step with scaler
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        # Gradient clipping
+                        if args.grad_clip > 0:
+                            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+
+                        opt.step()
+
+                    # Update learning rate
+                    if scheduler is not None:
+                        scheduler.step()
+
+                    # Use accumulated loss for logging
+                    current_loss = accum_loss / args.grad_accum_steps
+                    accum_loss = 0.0
+                else:
+                    # Don't log intermediate accumulation steps
+                    current_loss = None
 
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
@@ -217,40 +239,45 @@ def main():
                 else:
                     raise e
 
-            # Calculate training perplexity
-            train_loss_val = loss.item()
-            train_ppl = torch.exp(torch.tensor(train_loss_val)).item()
+            # Only log after accumulation steps
+            if current_loss is not None:
+                # Calculate training perplexity
+                train_loss_val = current_loss
+                train_ppl = torch.exp(torch.tensor(train_loss_val)).item()
 
-            # Validation evaluation
-            val_loss = ''
-            val_ppl = ''
-            if step % 100 == 0:
-                val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=args.mixed_precision)
-                if val_loss < best:
-                    best = val_loss
-                    base = getattr(model, "_orig_mod", model)
-                    torch.save({
-                        'model': base.state_dict(),
-                        'tok': tok.to_str(),
-                        'config': {
-                            'dim': base.dim,
-                            'n_layers': len(base.blocks),
-                            'n_heads': base.n_heads,
-                            'vocab_size': tok.get_vocab_size(),
-                        }
-                    }, 'out/best.pt')
-                    print(f"\n[Step {step}] New best validation loss: {val_loss:.3f} (PPL: {val_ppl:.1f})")
+                # Validation evaluation
+                val_loss = ''
+                val_ppl = ''
+                if step % 100 == 0 and (step + 1) % args.grad_accum_steps == 0:
+                    val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=args.mixed_precision)
+                    if val_loss < best:
+                        best = val_loss
+                        base = getattr(model, "_orig_mod", model)
+                        torch.save({
+                            'model': base.state_dict(),
+                            'tok': tok.to_str(),
+                            'config': {
+                                'dim': base.dim,
+                                'n_layers': len(base.blocks),
+                                'n_heads': base.n_heads,
+                                'vocab_size': tok.get_vocab_size(),
+                            }
+                        }, 'out/best.pt')
+                        print(f"\n[Step {step}] New best validation loss: {val_loss:.3f} (PPL: {val_ppl:.1f})")
 
-            writer.writerow([
-                step,
-                float(train_loss_val),
-                float(train_ppl),
-                ('' if val_loss=='' else float(val_loss)),
-                ('' if val_ppl=='' else float(val_ppl)),
-                get_lr()
-            ])
+                if (step + 1) % args.grad_accum_steps == 0:
+                    writer.writerow([
+                        step,
+                        float(train_loss_val),
+                        float(train_ppl),
+                        ('' if val_loss=='' else float(val_loss)),
+                        ('' if val_ppl=='' else float(val_ppl)),
+                        get_lr()
+                    ])
+
+                pbar.set_description(f'Loss: {train_loss_val:.3f} (PPL: {train_ppl:.1f}), LR: {get_lr():.2e}')
+
             step += 1
-            pbar.set_description(f'Loss: {train_loss_val:.3f} (PPL: {train_ppl:.1f}), LR: {get_lr():.2e}')
             pbar.update(1)
         pbar.close()
 
