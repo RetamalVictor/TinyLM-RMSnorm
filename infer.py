@@ -40,11 +40,16 @@ def generate(model, tok, prompt, max_new_tokens=128, temperature=1.0, top_p=0.9,
                     logits[b, unique] -= freq_penalty * counts.to(logits.dtype)
                 if presence_penalty > 0.0:
                     logits[b, unique] -= presence_penalty
-        # Temperature
-        if temperature != 1.0:
-            logits = logits / max(1e-8, temperature)
-        # Nucleus sampling
-        next_id = sample_top_p(logits, top_p=top_p)
+        # Temperature scaling
+        if temperature > 0:
+            # Apply temperature scaling for sampling
+            if temperature != 1.0:
+                logits = logits / temperature
+            # Nucleus sampling
+            next_id = sample_top_p(logits, top_p=top_p)
+        else:
+            # Temperature = 0 means greedy decoding (argmax)
+            next_id = torch.argmax(logits, dim=-1, keepdim=True)
         ids = torch.cat([ids, next_id], dim=1)
         if stream:
             print(tok.decode(ids[0].tolist()), flush=True)
@@ -56,7 +61,7 @@ def main():
     ap.add_argument('--ckpt', type=str, required=True)
     ap.add_argument('--prompt', type=str, default='Once upon a time')
     ap.add_argument('--max_new_tokens', type=int, default=128)
-    ap.add_argument('--temperature', type=float, default=0.9)
+    ap.add_argument('--temperature', type=float, default=0.9, help='Sampling temperature (0=greedy, >0=sampling)')
     ap.add_argument('--top_p', type=float, default=0.9)
     ap.add_argument('--repetition_penalty', type=float, default=1.1)
     ap.add_argument('--freq_penalty', type=float, default=0.0)
