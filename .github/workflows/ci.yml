@@ -25,7 +25,7 @@ jobs:
           python -m py_compile train.py
           python -m py_compile infer.py
           python -m py_compile scripts/bench_rmsnorm.py
-          python -m py_compile scripts/bench_kv_cache.py
+          python -m py_compile scripts/bench_kv_curve.py
           echo "✓ All Python files have valid syntax"
 
       - name: Verify CUDA kernel implementation
@@ -44,7 +44,7 @@ jobs:
           echo ""
           echo "Performance Benchmarks:"
           test -f scripts/bench_rmsnorm.py && echo "  ✓ RMSNorm kernel vs PyTorch baseline"
-          test -f scripts/bench_kv_cache.py && echo "  ✓ KV-cache optimization"
+          test -f scripts/bench_kv_vs_nokv.py && echo "  ✓ KV-cache vs no-cache comparison"
           test -f scripts/bench_kv_curve.py && echo "  ✓ Context length scaling"
           echo ""
           echo "Documentation:"
