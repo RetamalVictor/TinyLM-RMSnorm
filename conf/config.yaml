@@ -1,0 +1,36 @@
+defaults:
+  - model: small
+  - training: default
+  - data: tinyshakespeare
+  - quant: none
+  - _self_
+
+# Experiment tracking
+experiment:
+  name: ${model.name}_${data.name}
+  seed: 42
+
+# Output directories (Hydra manages these)
+output_dir: outputs
+checkpoint_dir: ${output_dir}/checkpoints
+
+# Checkpointing
+checkpoint:
+  save_every: 500        # Save checkpoint every N steps
+  keep_last: 3           # Keep last N checkpoints
+  save_best: true        # Save best model based on val_loss
+
+# Logging
+logging:
+  log_every: 10          # Log metrics every N steps
+  eval_every: 100        # Run validation every N steps
+  tensorboard: true      # Enable TensorBoard logging
+
+# Resume training
+resume:
+  enabled: false
+  checkpoint_path: null  # Path to checkpoint to resume from
+
+# Hardware
+device: cuda
+compile: false           # torch.compile (requires PyTorch 2.0+)

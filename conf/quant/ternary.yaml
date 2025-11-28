@@ -1,0 +1,11 @@
+# Ternary quantization using BitTorch
+# Quantizes weights to {-1, 0, +1} with per-channel scaling
+name: ternary
+enabled: true
+method: ternary
+threshold_factor: 0.05
+per_channel: true
+backend: auto  # auto, cuda, or python
+quantize_attention: true
+quantize_mlp: true
+quantize_head: false  # Keep output head in FP32 for stability

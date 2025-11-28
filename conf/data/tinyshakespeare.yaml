@@ -1,0 +1,4 @@
+name: tinyshakespeare
+train_path: data/tinyshakespeare_train.txt
+val_path: data/tinyshakespeare_val.txt
+prepare_script: data/prepare_tinyshakespeare.py

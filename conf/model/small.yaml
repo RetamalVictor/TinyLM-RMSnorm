@@ -1,0 +1,6 @@
+name: small
+dim: 384
+n_layers: 6
+n_heads: 6
+dropout: 0.1
+max_seq_len: 4096

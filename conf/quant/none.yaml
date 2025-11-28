@@ -1,0 +1,10 @@
+# No quantization (standard FP32/FP16 training)
+name: none
+enabled: false
+method: none
+threshold_factor: 0.05
+per_channel: true
+backend: auto
+quantize_attention: true
+quantize_mlp: true
+quantize_head: false

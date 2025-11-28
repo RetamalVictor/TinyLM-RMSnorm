@@ -89,6 +89,10 @@ $RECYCLE.BIN/
 # Linux
 *~
 
-# others
-*.txt
+# Training outputs
+outputs/
 out/
+tokenizer.json
+
+# Data (keep prepare scripts, ignore downloaded data)
+data/*.txt

@@ -1,84 +1,242 @@
-import time, argparse, os, sys, os.path as osp, torch
-ROOT = osp.abspath(osp.join(osp.dirname(__file__), '..'))
-if ROOT not in sys.path: sys.path.insert(0, ROOT)
+"""
+Benchmark KV-cache vs no-KV-cache performance comparison.
 
-from tokenizers import Tokenizer
-from model import TinyLM, build_sincos, prealloc_kvcache
+This refactored version uses the benchmark base class to eliminate duplication
+and provides proper statistical measurements.
+"""
 
-WARMUP = 20
+import argparse
+import time
+import torch
+from typing import List, Tuple
 
-ap = argparse.ArgumentParser()
-ap.add_argument('--ckpt', required=True)
-ap.add_argument('--steps', type=int, default=256)
-ap.add_argument('--prompt', type=str, default='Once upon a time')
-ap.add_argument('--label', type=str, default='gpu')
-ap.add_argument('--out', type=str, default='out/kv_vs_nokv.csv')
-ap.add_argument('--dtype', type=str, default='fp16', choices=['fp16','fp32'])
-args = ap.parse_args()
+from benchmark_base import BenchmarkConfig, KVCacheBenchmark
 
-ckpt = torch.load(args.ckpt, map_location='cpu')
-tok = Tokenizer.from_str(ckpt['tok'])
-cfg = ckpt.get('config') or {'dim':384,'n_layers':6,'n_heads':6,'vocab_size':tok.get_vocab_size()}
 
-m = TinyLM(cfg['vocab_size'], cfg['dim'], cfg['n_layers'], cfg['n_heads']).cuda().eval()
-st = ckpt['model']
-if any(k.startswith('_orig_mod.') for k in st): st = {k.replace('_orig_mod.','',1):v for k,v in st.items()}
-m.load_state_dict(st, strict=False)
-if args.dtype == 'fp16': m.half()
+class KVComparisonRunner(KVCacheBenchmark):
+    """Runner for KV-cache comparison benchmarks."""
 
-dhead = cfg['dim'] // cfg['n_heads']
-dtype = next(m.parameters()).dtype
-# build RoPE in model dtype
-sin, cos = build_sincos(8192, dhead, 'cuda'); sin, cos = sin.to(dtype), cos.to(dtype)
-ids0 = torch.tensor(tok.encode(args.prompt).ids, device='cuda')[None,:]
+    def __init__(self, config: BenchmarkConfig, args):
+        """Initialize with config and additional arguments."""
+        super().__init__(config)
+        self.args = args
+        self.warmup = 20
 
-def with_kv():
-    ids = ids0.clone()
-    # 1) prefill: write the whole prefix to cache in one pass
-    cache = prealloc_kvcache(1, ids.size(1)+WARMUP+args.steps, cfg['n_heads'], dhead, 'cuda', dtype)
-    _ = m(ids, sin, cos, cache, start_pos=0)  # prefill prefix
-    # 2) warm up incremental
-    for _ in range(WARMUP):
-        logits = m(ids[:, -1:], sin, cos, cache, start_pos=ids.size(1)-1)[:, -1, :]
-        ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    # 3) timed incremental
-    torch.cuda.synchronize(); t0=time.time()
-    for _ in range(args.steps):
-        logits = m(ids[:, -1:], sin, cos, cache, start_pos=ids.size(1)-1)[:, -1, :]
-        ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
-    torch.cuda.synchronize(); t1=time.time()
-    return args.steps/(t1-t0)
+    def benchmark_with_kv(self) -> Tuple[float, float]:
+        """Benchmark with KV-cache enabled.
 
-def no_kv():
-    ids = ids0.clone()
-    # recompute over the full prefix each step (no cache reuse)
-    # warmup
-    for _ in range(5):
-        # Process entire sequence without cache (cache=None means no caching)
-        logits = m(ids, sin, cos, cache=None, start_pos=0)[:, -1, :]
-        ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
+        Returns:
+            Tuple of (mean_tps, std_tps)
+        """
+        device, _ = self.get_device_dtype()
 
-    torch.cuda.synchronize()
-    t0 = time.time()
+        # Load checkpoint for tokenizer if needed
+        if self.tokenizer is None:
+            self.load_checkpoint()
 
-    # Actual measurement - process full sequence from scratch each time
-    for _ in range(args.steps):
-        logits = m(ids, sin, cos, cache=None, start_pos=0)[:, -1, :]
-        ids = torch.cat([ids, torch.argmax(logits, dim=-1, keepdim=True)], dim=1)
+        # Encode prompt
+        ids = torch.tensor(
+            self.tokenizer.encode(self.args.prompt).ids,
+            device=device
+        ).unsqueeze(0)
 
-    torch.cuda.synchronize()
-    t1 = time.time()
-    return args.steps/(t1-t0)
+        # Prepare RoPE tables
+        max_len = ids.size(1) + self.warmup + self.args.steps
+        sin, cos = self.prepare_rope_tables(max_len)
 
-os.makedirs('out', exist_ok=True)
-kv_tps, nokv_tps = with_kv(), no_kv()
+        # Pre-allocate cache
+        cache = self.create_kv_cache(1, max_len)
 
-hdr = 'label,mode,steps,dtype,tokens_per_sec\n'
-append = os.path.exists(args.out)
-with open(args.out, 'a' if append else 'w') as f:
-    if not append: f.write(hdr)
-    f.write(f'{args.label},with_kv,{args.steps},{args.dtype},{kv_tps:.2f}\n')
-    f.write(f'{args.label},no_kv,{args.steps},{args.dtype},{nokv_tps:.2f}\n')
-print('with_kv tokens/sec:', kv_tps)
-print('no_kv  tokens/sec:', nokv_tps)
-print('Wrote', args.out)
+        # Prefill cache
+        _ = self.model(ids, sin, cos, cache, start_pos=0)
+
+        # Warmup incremental decoding
+        for _ in range(self.warmup):
+            logits = self.model(
+                ids[:, -1:], sin, cos, cache,
+                start_pos=ids.size(1) - 1
+            )[:, -1, :]
+            ids = torch.cat([
+                ids,
+                torch.argmax(logits, dim=-1, keepdim=True)
+            ], dim=1)
+
+        # Measure with multiple runs
+        def run_with_kv():
+            nonlocal ids
+            temp_ids = ids.clone()
+            for _ in range(self.args.steps):
+                logits = self.model(
+                    temp_ids[:, -1:], sin, cos, cache,
+                    start_pos=temp_ids.size(1) - 1
+                )[:, -1, :]
+                temp_ids = torch.cat([
+                    temp_ids,
+                    torch.argmax(logits, dim=-1, keepdim=True)
+                ], dim=1)
+
+        stats = self.measure_with_stats(
+            run_with_kv,
+            n_runs=self.args.n_runs,
+            warmup=2
+        )
+
+        mean_tps = self.args.steps / stats['mean']
+        std_tps = self.args.steps * stats['std'] / (stats['mean'] ** 2)
+
+        return mean_tps, std_tps
+
+    def benchmark_no_kv(self) -> Tuple[float, float]:
+        """Benchmark without KV-cache (full recomputation).
+
+        Returns:
+            Tuple of (mean_tps, std_tps)
+        """
+        device, _ = self.get_device_dtype()
+
+        # Load checkpoint for tokenizer if needed
+        if self.tokenizer is None:
+            self.load_checkpoint()
+
+        # Encode prompt
+        ids = torch.tensor(
+            self.tokenizer.encode(self.args.prompt).ids,
+            device=device
+        ).unsqueeze(0)
+
+        # Prepare RoPE tables
+        max_len = 8192
+        sin, cos = self.prepare_rope_tables(max_len)
+
+        # Warmup
+        tmp = ids.clone()
+        for _ in range(5):
+            logits = self.model(
+                tmp, sin, cos, cache=None, start_pos=0
+            )[:, -1, :]
+            tmp = torch.cat([
+                tmp,
+                torch.argmax(logits, dim=-1, keepdim=True)
+            ], dim=1)
+
+        # Measure with multiple runs
+        def run_no_kv():
+            temp_ids = ids.clone()
+            for _ in range(self.args.steps):
+                logits = self.model(
+                    temp_ids, sin, cos, cache=None, start_pos=0
+                )[:, -1, :]
+                temp_ids = torch.cat([
+                    temp_ids,
+                    torch.argmax(logits, dim=-1, keepdim=True)
+                ], dim=1)
+
+        stats = self.measure_with_stats(
+            run_no_kv,
+            n_runs=self.args.n_runs,
+            warmup=2
+        )
+
+        mean_tps = self.args.steps / stats['mean']
+        std_tps = self.args.steps * stats['std'] / (stats['mean'] ** 2)
+
+        return mean_tps, std_tps
+
+    def run(self) -> Tuple[Tuple, List[Tuple]]:
+        """Run the KV-cache comparison benchmark.
+
+        Returns:
+            Tuple of (headers, results)
+        """
+        # Create model
+        self.create_model(dropout=0.0)
+
+        print(f"\nKV-Cache Comparison Benchmark")
+        print(f"  Prompt: '{self.args.prompt}'")
+        print(f"  Steps: {self.args.steps}")
+        print(f"  Data type: {self.config.dtype}")
+        print()
+
+        # Benchmark with KV-cache
+        kv_mean, kv_std = self.benchmark_with_kv()
+        print(f"With KV-cache:    {kv_mean:7.2f} ± {kv_std:5.2f} tokens/sec")
+
+        # Benchmark without KV-cache
+        nokv_mean, nokv_std = self.benchmark_no_kv()
+        print(f"Without KV-cache: {nokv_mean:7.2f} ± {nokv_std:5.2f} tokens/sec")
+
+        # Calculate speedup
+        speedup = kv_mean / max(nokv_mean, 1e-9)
+        print(f"Speedup:          {speedup:7.2f}x")
+
+        # Prepare results
+        headers = ('label', 'mode', 'steps', 'dtype', 'tokens_per_sec', 'std_dev')
+        results = [
+            (
+                self.config.label,
+                'with_kv',
+                self.args.steps,
+                self.config.dtype,
+                f'{kv_mean:.2f}',
+                f'{kv_std:.2f}'
+            ),
+            (
+                self.config.label,
+                'no_kv',
+                self.args.steps,
+                self.config.dtype,
+                f'{nokv_mean:.2f}',
+                f'{nokv_std:.2f}'
+            )
+        ]
+
+        return headers, results
+
+
+def main():
+    """Main entry point."""
+    parser = argparse.ArgumentParser(description='KV-cache vs no-cache comparison')
+
+    # Checkpoint and model
+    parser.add_argument('--ckpt', required=True, help='Path to checkpoint')
+    parser.add_argument('--dtype', default='fp16', choices=['fp16', 'fp32', 'bf16'])
+    parser.add_argument('--device', default='cuda', help='Device to use')
+
+    # Benchmark parameters
+    parser.add_argument('--steps', type=int, default=256,
+                       help='Number of generation steps')
+    parser.add_argument('--n_runs', type=int, default=10,
+                       help='Number of runs for statistics')
+
+    # Other options
+    parser.add_argument('--prompt', default='Once upon a time',
+                       help='Prompt to use')
+    parser.add_argument('--label', type=str, help='Device label')
+    parser.add_argument('--out', default='out/kv_vs_nokv.csv',
+                       help='Output CSV path')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed')
+
+    args = parser.parse_args()
+
+    # Create configuration
+    config = BenchmarkConfig(
+        checkpoint=args.ckpt,
+        device=args.device,
+        dtype=args.dtype,
+        label=args.label,
+        output_dir='out',
+        seed=args.seed
+    )
+
+    # Run benchmark
+    runner = KVComparisonRunner(config, args)
+    headers, results = runner.run()
+
+    # Append to CSV (preserving original behavior)
+    runner.append_csv(args.out, results, headers)
+
+    print(f"\nBenchmark complete! Results appended to {args.out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,8 +1,8 @@
 services:
   tinyml:
     build:
-      context: .
-      dockerfile: Dockerfile
+      context: ..
+      dockerfile: TinyLM-RMSnorm/Dockerfile
     image: tinyml:dev
     shm_size: "8g"
     environment:
@@ -19,6 +19,7 @@ services:
               capabilities: [gpu]
     volumes:
       - .:/workspace/app
+      - ../bittorch:/workspace/bittorch
       - hf-cache:/workspace/.cache/huggingface
       - ./out:/workspace/app/out
       - ./data:/workspace/app/data
