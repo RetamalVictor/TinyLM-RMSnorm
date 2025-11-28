@@ -175,22 +175,68 @@ def evaluate(model, dataloader, sin, cos, device, use_amp=False):
 
 
 def get_lr_scheduler(optimizer, cfg):
-    """Create learning rate scheduler based on config."""
+    """Create learning rate scheduler with optional warmup."""
+    warmup_steps = cfg.training.warmup_steps
+    total_steps = cfg.training.steps
+    min_lr = cfg.training.lr * cfg.training.min_lr_ratio
+
     if cfg.training.lr_schedule == 'cosine':
-        return torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer,
-            T_max=cfg.training.steps,
-            eta_min=cfg.training.lr * cfg.training.min_lr_ratio
-        )
+        if warmup_steps > 0:
+            # Warmup + Cosine decay
+            warmup = torch.optim.lr_scheduler.LinearLR(
+                optimizer,
+                start_factor=1e-8 / cfg.training.lr,
+                end_factor=1.0,
+                total_iters=warmup_steps
+            )
+            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=total_steps - warmup_steps,
+                eta_min=min_lr
+            )
+            return torch.optim.lr_scheduler.SequentialLR(
+                optimizer,
+                schedulers=[warmup, cosine],
+                milestones=[warmup_steps]
+            )
+        else:
+            return torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer,
+                T_max=total_steps,
+                eta_min=min_lr
+            )
     elif cfg.training.lr_schedule == 'linear':
         return torch.optim.lr_scheduler.LinearLR(
             optimizer,
             start_factor=0.1,
             end_factor=1.0,
-            total_iters=cfg.training.warmup_steps
+            total_iters=warmup_steps if warmup_steps > 0 else total_steps
         )
+    elif cfg.training.lr_schedule == 'constant':
+        return None
     else:
         return None
+
+
+class EarlyStopping:
+    """Early stopping to stop training when validation loss doesn't improve."""
+
+    def __init__(self, patience: int = 5, min_delta: float = 0.0):
+        self.patience = patience
+        self.min_delta = min_delta
+        self.counter = 0
+        self.best_loss = float('inf')
+        self.should_stop = False
+
+    def __call__(self, val_loss: float) -> bool:
+        if val_loss < self.best_loss - self.min_delta:
+            self.best_loss = val_loss
+            self.counter = 0
+        else:
+            self.counter += 1
+            if self.counter >= self.patience:
+                self.should_stop = True
+        return self.should_stop
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -287,6 +333,15 @@ def main(cfg: DictConfig):
 
     # Learning rate scheduler
     scheduler = get_lr_scheduler(optimizer, cfg)
+
+    # Early stopping
+    early_stopping = None
+    if cfg.training.early_stopping_patience > 0:
+        early_stopping = EarlyStopping(
+            patience=cfg.training.early_stopping_patience,
+            min_delta=cfg.training.early_stopping_min_delta
+        )
+        log.info(f"Early stopping enabled: patience={cfg.training.early_stopping_patience}")
 
     # Mixed precision scaler
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.mixed_precision) if device == 'cuda' else None
@@ -431,6 +486,11 @@ def main(cfg: DictConfig):
                         'quant_config': quant_config.to_dict() if quant_config else None,
                     }
                     ckpt_manager.save(state, step, is_best=True)
+
+                # Early stopping check
+                if early_stopping is not None and early_stopping(val_loss):
+                    log.info(f"Early stopping triggered at step {step} (patience={cfg.training.early_stopping_patience})")
+                    break
 
             # Periodic checkpoint
             if step % cfg.checkpoint.save_every == 0 and step > 0:
