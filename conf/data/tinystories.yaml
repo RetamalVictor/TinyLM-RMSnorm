@@ -1,4 +1,4 @@
 name: tinystories
 train_path: data/tinystories_train.txt
 val_path: data/tinystories_val.txt
-prepare_script: data/prepare_tinystories.py
+prepare_script: scripts/prepare_tinystories.py

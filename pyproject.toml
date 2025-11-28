@@ -43,7 +43,7 @@ tinylm-train = "train:main"
 tinylm-infer = "infer:main"
 
 [tool.setuptools]
-packages = ["tinylm", "tinylm.model", "tinylm.inference", "tinylm.quant", "tinylm._ext"]
+packages = ["tinylm", "tinylm.model", "tinylm.inference", "tinylm.quant", "tinylm._ext", "tinylm.training"]
 py-modules = ["train", "infer"]
 include-package-data = true
 
@@ -59,7 +59,7 @@ dev = [
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
-bittorch = { path = "../bittorch" }
+bittorch = { path = "../bittorch", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"

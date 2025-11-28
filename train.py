@@ -9,234 +9,38 @@ Usage:
 """
 
 import os
-import glob
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 import logging
 from pathlib import Path
-from datetime import datetime
 
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from torch.utils.tensorboard import SummaryWriter
 from tokenizers import Tokenizer
-from tokenizers.models import BPE
-from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace
 from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
 from tinylm import TinyLM, build_sincos
 from tinylm.quant import QuantConfig
+from tinylm.training import (
+    build_tokenizer,
+    create_dataloaders,
+    CheckpointManager,
+    MetricsLogger,
+    get_lr_scheduler,
+    EarlyStopping,
+    setup_signal_handlers,
+    is_shutdown_requested,
+    evaluate,
+    count_parameters,
+)
 
 log = logging.getLogger(__name__)
 
-
-class CharDataset(torch.utils.data.Dataset):
-    """Character-level dataset for language modeling."""
-
-    def __init__(self, text: str, seq_len: int, tokenizer: Tokenizer):
-        self.seq_len = seq_len
-        self.tok = tokenizer
-        self.ids = self.tok.encode(text).ids
-
-    def __len__(self):
-        return max(0, len(self.ids) - self.seq_len)
-
-    def __getitem__(self, i):
-        x = self.ids[i:i + self.seq_len]
-        y = self.ids[i + 1:i + self.seq_len + 1]
-        return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
-
-
-def build_tokenizer(corpus_paths: list, out_path: str) -> Tokenizer:
-    """Build BPE tokenizer from corpus files."""
-    tok = Tokenizer(BPE(unk_token="<unk>"))
-    tok.pre_tokenizer = Whitespace()
-    trainer = BpeTrainer(vocab_size=4096, min_frequency=2, special_tokens=["<unk>"])
-
-    def line_iter():
-        for p in corpus_paths:
-            with open(p, 'r', encoding='utf-8') as f:
-                for line in f:
-                    yield line.strip()
-
-    tok.train_from_iterator(line_iter(), trainer=trainer)
-    tok.save(out_path)
-    return tok
-
-
-class CheckpointManager:
-    """Manages checkpoint saving and loading with rotation."""
-
-    def __init__(self, checkpoint_dir: str, keep_last: int = 3):
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        self.keep_last = keep_last
-        self.best_loss = float('inf')
-
-    def save(self, state: dict, step: int, is_best: bool = False):
-        """Save checkpoint and optionally update best model."""
-        # Save regular checkpoint
-        ckpt_path = self.checkpoint_dir / f"step_{step:08d}.pt"
-        torch.save(state, ckpt_path)
-        log.info(f"Saved checkpoint: {ckpt_path}")
-
-        # Save best model
-        if is_best:
-            best_path = self.checkpoint_dir / "best.pt"
-            torch.save(state, best_path)
-            log.info(f"New best model saved: {best_path}")
-
-        # Rotate old checkpoints
-        self._rotate_checkpoints()
-
-    def _rotate_checkpoints(self):
-        """Keep only the last N checkpoints."""
-        ckpts = sorted(glob.glob(str(self.checkpoint_dir / "step_*.pt")))
-        while len(ckpts) > self.keep_last:
-            oldest = ckpts.pop(0)
-            os.remove(oldest)
-            log.debug(f"Removed old checkpoint: {oldest}")
-
-    def load(self, checkpoint_path: str) -> dict:
-        """Load checkpoint from path."""
-        log.info(f"Loading checkpoint: {checkpoint_path}")
-        return torch.load(checkpoint_path, map_location='cpu')
-
-    def get_latest(self) -> str | None:
-        """Get path to the latest checkpoint."""
-        ckpts = sorted(glob.glob(str(self.checkpoint_dir / "step_*.pt")))
-        return ckpts[-1] if ckpts else None
-
-
-class MetricsLogger:
-    """Handles TensorBoard and console logging."""
-
-    def __init__(self, log_dir: str, enabled: bool = True):
-        self.enabled = enabled
-        if enabled:
-            self.writer = SummaryWriter(log_dir)
-            log.info(f"TensorBoard logging to: {log_dir}")
-        else:
-            self.writer = None
-
-    def log_scalar(self, tag: str, value: float, step: int):
-        if self.writer:
-            self.writer.add_scalar(tag, value, step)
-
-    def log_scalars(self, main_tag: str, tag_scalar_dict: dict, step: int):
-        if self.writer:
-            self.writer.add_scalars(main_tag, tag_scalar_dict, step)
-
-    def log_histogram(self, tag: str, values, step: int):
-        if self.writer:
-            self.writer.add_histogram(tag, values, step)
-
-    def log_hparams(self, hparams: dict, metrics: dict):
-        if self.writer:
-            self.writer.add_hparams(hparams, metrics)
-
-    def close(self):
-        if self.writer:
-            self.writer.close()
-
-
-@torch.no_grad()
-def evaluate(model, dataloader, sin, cos, device, use_amp=False):
-    """Evaluate model on validation set."""
-    model.eval()
-    total_loss = 0
-    n_batches = 0
-
-    for x, y in dataloader:
-        x, y = x.to(device), y.to(device)
-
-        if use_amp and device == 'cuda':
-            with torch.cuda.amp.autocast():
-                logits = model(x, sin, cos)
-                loss = nn.functional.cross_entropy(
-                    logits.view(-1, logits.size(-1)), y.view(-1)
-                )
-        else:
-            logits = model(x, sin, cos)
-            loss = nn.functional.cross_entropy(
-                logits.view(-1, logits.size(-1)), y.view(-1)
-            )
-
-        total_loss += loss.item()
-        n_batches += 1
-
-    model.train()
-    avg_loss = total_loss / max(1, n_batches)
-    perplexity = torch.exp(torch.tensor(avg_loss)).item()
-    return avg_loss, perplexity
-
-
-def get_lr_scheduler(optimizer, cfg):
-    """Create learning rate scheduler with optional warmup."""
-    warmup_steps = cfg.training.warmup_steps
-    total_steps = cfg.training.steps
-    min_lr = cfg.training.lr * cfg.training.min_lr_ratio
-
-    if cfg.training.lr_schedule == 'cosine':
-        if warmup_steps > 0:
-            # Warmup + Cosine decay
-            warmup = torch.optim.lr_scheduler.LinearLR(
-                optimizer,
-                start_factor=1e-8 / cfg.training.lr,
-                end_factor=1.0,
-                total_iters=warmup_steps
-            )
-            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=total_steps - warmup_steps,
-                eta_min=min_lr
-            )
-            return torch.optim.lr_scheduler.SequentialLR(
-                optimizer,
-                schedulers=[warmup, cosine],
-                milestones=[warmup_steps]
-            )
-        else:
-            return torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer,
-                T_max=total_steps,
-                eta_min=min_lr
-            )
-    elif cfg.training.lr_schedule == 'linear':
-        return torch.optim.lr_scheduler.LinearLR(
-            optimizer,
-            start_factor=0.1,
-            end_factor=1.0,
-            total_iters=warmup_steps if warmup_steps > 0 else total_steps
-        )
-    elif cfg.training.lr_schedule == 'constant':
-        return None
-    else:
-        return None
-
-
-class EarlyStopping:
-    """Early stopping to stop training when validation loss doesn't improve."""
-
-    def __init__(self, patience: int = 5, min_delta: float = 0.0):
-        self.patience = patience
-        self.min_delta = min_delta
-        self.counter = 0
-        self.best_loss = float('inf')
-        self.should_stop = False
-
-    def __call__(self, val_loss: float) -> bool:
-        if val_loss < self.best_loss - self.min_delta:
-            self.best_loss = val_loss
-            self.counter = 0
-        else:
-            self.counter += 1
-            if self.counter >= self.patience:
-                self.should_stop = True
-        return self.should_stop
+# Setup graceful shutdown
+setup_signal_handlers()
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -270,25 +74,22 @@ def main(cfg: DictConfig):
             f"Run 'python {cfg.data.prepare_script}' first."
         )
 
-    # Build or load tokenizer
-    tokenizer_path = "tokenizer.json"
-    if not os.path.exists(tokenizer_path):
+    # Build or load tokenizer (stored in Hydra output dir)
+    tokenizer_path = hydra_dir / "tokenizer.json"
+    if not tokenizer_path.exists():
         log.info("Building tokenizer...")
-        build_tokenizer([cfg.data.train_path, cfg.data.val_path], tokenizer_path)
-    tokenizer = Tokenizer.from_file(tokenizer_path)
+        build_tokenizer([cfg.data.train_path, cfg.data.val_path], str(tokenizer_path))
+    tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
-    # Load data
-    log.info("Loading data...")
-    with open(cfg.data.train_path, 'r', encoding='utf-8') as f:
-        train_text = f.read()
-    with open(cfg.data.val_path, 'r', encoding='utf-8') as f:
-        val_text = f.read()
-
-    train_ds = CharDataset(train_text, cfg.training.seq_len, tokenizer)
-    val_ds = CharDataset(val_text, cfg.training.seq_len, tokenizer)
-
-    train_dl = DataLoader(train_ds, batch_size=cfg.training.batch_size, shuffle=True, drop_last=True)
-    val_dl = DataLoader(val_ds, batch_size=cfg.training.batch_size, shuffle=False, drop_last=True)
+    # Create dataloaders
+    train_dl, val_dl = create_dataloaders(
+        train_path=cfg.data.train_path,
+        val_path=cfg.data.val_path,
+        tokenizer=tokenizer,
+        seq_len=cfg.training.seq_len,
+        batch_size=cfg.training.batch_size,
+        log_fn=log.info,
+    )
 
     # Build quantization config
     quant_config = None
@@ -320,7 +121,7 @@ def main(cfg: DictConfig):
         model = torch.compile(model)
 
     # Count parameters
-    n_params = sum(p.numel() for p in model.parameters())
+    n_params = count_parameters(model)
     log.info(f"Model parameters: {n_params:,} ({n_params/1e6:.2f}M)")
 
     # Optimizer
@@ -332,7 +133,14 @@ def main(cfg: DictConfig):
     )
 
     # Learning rate scheduler
-    scheduler = get_lr_scheduler(optimizer, cfg)
+    scheduler = get_lr_scheduler(
+        optimizer,
+        total_steps=cfg.training.steps,
+        warmup_steps=cfg.training.warmup_steps,
+        schedule=cfg.training.lr_schedule,
+        min_lr_ratio=cfg.training.min_lr_ratio,
+        base_lr=cfg.training.lr,
+    )
 
     # Early stopping
     early_stopping = None
@@ -376,8 +184,35 @@ def main(cfg: DictConfig):
     train_iter = iter(train_dl)
     pbar = tqdm(total=cfg.training.steps - start_step, initial=0)
     accum_loss = 0.0
+    grad_norm = None
+
+    # Initial validation (baseline)
+    if start_step == 0:
+        val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=cfg.training.mixed_precision)
+        metrics_logger.log_scalar('val/loss', val_loss, 0)
+        metrics_logger.log_scalar('val/perplexity', val_ppl, 0)
+        metrics_logger.flush()
+        best_val_loss = val_loss
+        log.info(f"[Step 0] Initial val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
 
     while step < cfg.training.steps:
+        # Check for graceful shutdown
+        if is_shutdown_requested():
+            log.info(f"Graceful shutdown at step {step}")
+            state = {
+                'step': step,
+                'model': model.state_dict(),
+                'optimizer': optimizer.state_dict(),
+                'scheduler': scheduler.state_dict() if scheduler else None,
+                'scaler': scaler.state_dict() if scaler else None,
+                'best_val_loss': best_val_loss,
+                'config': OmegaConf.to_container(cfg, resolve=True),
+                'tokenizer': tokenizer.to_str(),
+                'quant_config': quant_config.to_dict() if quant_config else None,
+            }
+            ckpt_manager.save(state, step, is_best=False)
+            break
+
         # Get batch
         try:
             x, y = next(train_iter)
@@ -445,32 +280,36 @@ def main(cfg: DictConfig):
             # Get current LR
             current_lr = optimizer.param_groups[0]['lr']
 
+            # Compute optimizer step (actual update count)
+            optimizer_step = (step + 1) // cfg.training.grad_accum_steps
+
             # Log training metrics
-            if step % cfg.logging.log_every == 0:
+            if optimizer_step % cfg.logging.log_every == 0:
                 train_ppl = torch.exp(torch.tensor(train_loss)).item()
-                metrics_logger.log_scalar('train/loss', train_loss, step)
-                metrics_logger.log_scalar('train/perplexity', train_ppl, step)
-                metrics_logger.log_scalar('train/lr', current_lr, step)
-                if 'grad_norm' in dir():
-                    metrics_logger.log_scalar('train/grad_norm', grad_norm.item(), step)
+                metrics_logger.log_scalar('train/loss', train_loss, optimizer_step)
+                metrics_logger.log_scalar('train/perplexity', train_ppl, optimizer_step)
+                metrics_logger.log_scalar('train/lr', current_lr, optimizer_step)
+                if grad_norm is not None:
+                    metrics_logger.log_scalar('train/grad_norm', grad_norm.item(), optimizer_step)
 
                 pbar.set_description(
                     f"Loss: {train_loss:.3f} | PPL: {train_ppl:.1f} | LR: {current_lr:.2e}"
                 )
 
             # Validation
-            if step % cfg.logging.eval_every == 0 and step > 0:
+            if optimizer_step % cfg.logging.eval_every == 0 and optimizer_step > 0:
                 val_loss, val_ppl = evaluate(
                     model, val_dl, sin, cos, device,
                     use_amp=cfg.training.mixed_precision
                 )
-                metrics_logger.log_scalar('val/loss', val_loss, step)
-                metrics_logger.log_scalar('val/perplexity', val_ppl, step)
+                metrics_logger.log_scalar('val/loss', val_loss, optimizer_step)
+                metrics_logger.log_scalar('val/perplexity', val_ppl, optimizer_step)
+                metrics_logger.flush()
 
                 is_best = val_loss < best_val_loss
                 if is_best:
                     best_val_loss = val_loss
-                    log.info(f"[Step {step}] New best val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
+                    log.info(f"[Step {optimizer_step}] New best val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
 
                 # Save checkpoint
                 if cfg.checkpoint.save_best and is_best:
@@ -489,11 +328,11 @@ def main(cfg: DictConfig):
 
                 # Early stopping check
                 if early_stopping is not None and early_stopping(val_loss):
-                    log.info(f"Early stopping triggered at step {step} (patience={cfg.training.early_stopping_patience})")
+                    log.info(f"Early stopping triggered at step {optimizer_step} (patience={cfg.training.early_stopping_patience})")
                     break
 
             # Periodic checkpoint
-            if step % cfg.checkpoint.save_every == 0 and step > 0:
+            if optimizer_step % cfg.checkpoint.save_every == 0 and optimizer_step > 0:
                 state = {
                     'step': step,
                     'model': model.state_dict(),

@@ -1,0 +1,4 @@
+name: combined
+train_path: data/combined_train.txt
+val_path: data/combined_val.txt
+prepare_script: scripts/prepare_combined.py
