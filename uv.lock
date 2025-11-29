@@ -199,8 +199,8 @@ wheels = [
 
 [[package]]
 name = "bittorch"
-version = "0.1.5"
-source = { directory = "../bittorch" }
+version = "0.2.0"
+source = { editable = "../bittorch" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
@@ -217,6 +217,9 @@ requires-dist = [
     { name = "torchvision", specifier = ">=0.18.1" },
 ]
 provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [{ name = "pytest", specifier = ">=8.3.5" }]
 
 [[package]]
 name = "certifi"
@@ -1952,7 +1955,7 @@ provides-extras = ["dev"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "bittorch", directory = "../bittorch" },
+    { name = "bittorch", editable = "../bittorch" },
     { name = "pytest" },
     { name = "ruff" },
 ]

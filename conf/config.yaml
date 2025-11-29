@@ -24,6 +24,7 @@ checkpoint:
 logging:
   log_every: 10          # Log metrics every N steps
   eval_every: 100        # Run validation every N steps
+  max_eval_batches: 100  # Max batches per validation (null for all)
   tensorboard: true      # Enable TensorBoard logging
 
 # Resume training

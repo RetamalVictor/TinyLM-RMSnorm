@@ -8,7 +8,8 @@ from torch.utils.data import Dataset, IterableDataset, DataLoader
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import Whitespace
+from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 
 
 class CharDataset(Dataset):
@@ -36,11 +37,17 @@ class StreamingDataset(IterableDataset):
         self.seq_len = seq_len
         self.tok = tokenizer
         self.chunk_size = chunk_size  # 1MB chunks by default
+        self._stop_iteration = False
+
+    def stop(self):
+        """Signal to stop iteration (for graceful shutdown)."""
+        self._stop_iteration = True
 
     def __iter__(self):
+        self._stop_iteration = False
         buffer_ids = []
         with open(self.file_path, 'r', encoding='utf-8') as f:
-            while True:
+            while not self._stop_iteration:
                 chunk = f.read(self.chunk_size)
                 if not chunk:
                     break
@@ -49,7 +56,7 @@ class StreamingDataset(IterableDataset):
                 buffer_ids.extend(chunk_ids)
 
                 # Yield sequences from buffer
-                while len(buffer_ids) >= self.seq_len + 1:
+                while len(buffer_ids) >= self.seq_len + 1 and not self._stop_iteration:
                     x = buffer_ids[:self.seq_len]
                     y = buffer_ids[1:self.seq_len + 1]
                     yield torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
@@ -57,7 +64,7 @@ class StreamingDataset(IterableDataset):
                     buffer_ids = buffer_ids[self.seq_len:]
 
         # Yield remaining if enough tokens
-        while len(buffer_ids) >= self.seq_len + 1:
+        while len(buffer_ids) >= self.seq_len + 1 and not self._stop_iteration:
             x = buffer_ids[:self.seq_len]
             y = buffer_ids[1:self.seq_len + 1]
             yield torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
@@ -65,10 +72,20 @@ class StreamingDataset(IterableDataset):
 
 
 def build_tokenizer(corpus_paths: list, out_path: str, vocab_size: int = 4096) -> Tokenizer:
-    """Build BPE tokenizer from corpus files."""
+    """Build BPE tokenizer with ByteLevel encoding (GPT-2 style).
+
+    Uses ByteLevel pre-tokenizer and decoder to properly handle subword merging.
+    This prevents the "igh ing ly" problem where subwords decode with spaces.
+    """
     tok = Tokenizer(BPE(unk_token="<unk>"))
-    tok.pre_tokenizer = Whitespace()
-    trainer = BpeTrainer(vocab_size=vocab_size, min_frequency=2, special_tokens=["<unk>"])
+    tok.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
+    tok.decoder = ByteLevelDecoder()
+    trainer = BpeTrainer(
+        vocab_size=vocab_size,
+        min_frequency=2,
+        special_tokens=["<unk>"],
+        initial_alphabet=ByteLevelPreTokenizer.alphabet()
+    )
 
     def line_iter():
         for p in corpus_paths:
@@ -119,7 +136,9 @@ def create_dataloaders(
     log(f"Loading val data into memory ({val_size_mb:.1f}MB)...")
     with open(val_path, 'r', encoding='utf-8') as f:
         val_text = f.read()
+    log(f"Tokenizing val data ({len(val_text):,} chars)...")
     val_ds = CharDataset(val_text, seq_len, tokenizer)
+    log(f"Val dataset ready: {len(val_ds):,} sequences")
     val_dl = DataLoader(val_ds, batch_size=batch_size, shuffle=False, drop_last=True)
 
     return train_dl, val_dl

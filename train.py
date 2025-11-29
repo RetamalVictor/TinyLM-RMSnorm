@@ -187,8 +187,10 @@ def main(cfg: DictConfig):
     grad_norm = None
 
     # Initial validation (baseline)
+    max_eval_batches = cfg.logging.get('max_eval_batches', None)
     if start_step == 0:
-        val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=cfg.training.mixed_precision)
+        log.info(f"Running initial validation (max_batches={max_eval_batches})...")
+        val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=cfg.training.mixed_precision, max_batches=max_eval_batches)
         metrics_logger.log_scalar('val/loss', val_loss, 0)
         metrics_logger.log_scalar('val/perplexity', val_ppl, 0)
         metrics_logger.flush()
@@ -300,7 +302,8 @@ def main(cfg: DictConfig):
             if optimizer_step % cfg.logging.eval_every == 0 and optimizer_step > 0:
                 val_loss, val_ppl = evaluate(
                     model, val_dl, sin, cos, device,
-                    use_amp=cfg.training.mixed_precision
+                    use_amp=cfg.training.mixed_precision,
+                    max_batches=max_eval_batches
                 )
                 metrics_logger.log_scalar('val/loss', val_loss, optimizer_step)
                 metrics_logger.log_scalar('val/perplexity', val_ppl, optimizer_step)
@@ -351,10 +354,14 @@ def main(cfg: DictConfig):
 
     pbar.close()
 
-    # Final evaluation and checkpoint
+    # Final evaluation and checkpoint (use more batches for accurate final score)
+    final_eval_batches = max_eval_batches * 5 if max_eval_batches else 500  # 5x normal or 500
+    log.info(f"Running final evaluation (max_batches={final_eval_batches})...")
     final_val_loss, final_val_ppl = evaluate(
         model, val_dl, sin, cos, device,
-        use_amp=cfg.training.mixed_precision
+        use_amp=cfg.training.mixed_precision,
+        max_batches=final_eval_batches,
+        log_progress=True
     )
     log.info(f"Final val_loss: {final_val_loss:.4f} (PPL: {final_val_ppl:.1f})")
     log.info(f"Best val_loss: {best_val_loss:.4f}")

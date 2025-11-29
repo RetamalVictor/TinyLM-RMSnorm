@@ -95,4 +95,4 @@ out/
 tokenizer.json
 
 # Data (keep prepare scripts, ignore downloaded data)
-data/*.txt
+data/*.txtjournal/

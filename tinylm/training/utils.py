@@ -37,7 +37,7 @@ def reset_shutdown_flag():
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, sin, cos, device, use_amp=False):
+def evaluate(model, dataloader, sin, cos, device, use_amp=False, max_batches=None, log_progress=False):
     """Evaluate model on validation set.
 
     Args:
@@ -46,6 +46,8 @@ def evaluate(model, dataloader, sin, cos, device, use_amp=False):
         sin, cos: RoPE embeddings
         device: Device to run on
         use_amp: Whether to use automatic mixed precision
+        max_batches: Maximum batches to evaluate (None for all)
+        log_progress: Log progress every 100 batches
 
     Returns:
         Tuple of (average_loss, perplexity)
@@ -55,6 +57,14 @@ def evaluate(model, dataloader, sin, cos, device, use_amp=False):
     n_batches = 0
 
     for x, y in dataloader:
+        if max_batches and n_batches >= max_batches:
+            break
+        if is_shutdown_requested():
+            break
+
+        if log_progress and n_batches > 0 and n_batches % 100 == 0:
+            log.info(f"  Eval progress: {n_batches} batches...")
+
         x, y = x.to(device), y.to(device)
 
         if use_amp and device == 'cuda':
