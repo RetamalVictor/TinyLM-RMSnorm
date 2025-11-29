@@ -77,9 +77,13 @@ def generate(
     )
 
     recent_window = 512
+
+    # Process full prompt first to fill KV cache
+    prompt_len = ids.size(1)
+    logits = model(ids, sin, cos, cache, start_pos=0)
+    logits = logits[:, -1, :]
+
     for _ in range(max_new_tokens):
-        logits = model(ids[:, -1:], sin, cos, cache, start_pos=ids.size(1)-1)
-        logits = logits[:, -1, :]
 
         # Apply penalties
         if ids.size(1) > 0 and (repetition_penalty > 1.0 or freq_penalty > 0.0 or presence_penalty > 0.0):
@@ -104,5 +108,9 @@ def generate(
         ids = torch.cat([ids, next_id], dim=1)
         if stream:
             print(tok.decode(ids[0].tolist()), flush=True)
+
+        # Compute logits for next iteration (single token with KV cache)
+        logits = model(next_id, sin, cos, cache, start_pos=ids.size(1)-1)
+        logits = logits[:, -1, :]
 
     return tok.decode(ids[0].tolist())
