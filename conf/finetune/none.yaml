@@ -1,0 +1,5 @@
+# Train from scratch (no fine-tuning)
+checkpoint_path: null
+freeze_embeddings: false
+freeze_head: false
+freeze_layers: []

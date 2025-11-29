@@ -1,0 +1,6 @@
+# Fine-tune all layers (no freezing)
+checkpoint_path: ???  # Required: path to checkpoint
+
+freeze_embeddings: false
+freeze_head: false
+freeze_layers: []

@@ -5,11 +5,13 @@ from pathlib import Path
 
 import torch
 from torch.utils.data import Dataset, IterableDataset, DataLoader
+from typing import Literal
+
 from tokenizers import Tokenizer
 from tokenizers.models import BPE
 from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
-from tokenizers.decoders import ByteLevel as ByteLevelDecoder
+from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer, Whitespace as WhitespacePreTokenizer
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder, BPEDecoder
 
 
 class CharDataset(Dataset):
@@ -71,20 +73,43 @@ class StreamingDataset(IterableDataset):
             buffer_ids = buffer_ids[self.seq_len:]
 
 
-def build_tokenizer(corpus_paths: list, out_path: str, vocab_size: int = 4096) -> Tokenizer:
-    """Build BPE tokenizer with ByteLevel encoding (GPT-2 style).
+def build_tokenizer(
+    corpus_paths: list,
+    out_path: str,
+    vocab_size: int = 4096,
+    tokenizer_type: Literal["bytelevel", "whitespace"] = "bytelevel"
+) -> Tokenizer:
+    """Build BPE tokenizer with configurable pre-tokenizer.
 
-    Uses ByteLevel pre-tokenizer and decoder to properly handle subword merging.
-    This prevents the "igh ing ly" problem where subwords decode with spaces.
+    Args:
+        corpus_paths: List of text files to train on
+        out_path: Where to save the tokenizer
+        vocab_size: Vocabulary size
+        tokenizer_type: Pre-tokenizer type
+            - "bytelevel": GPT-2 style, proper subword merging (recommended)
+            - "whitespace": Legacy, can cause "igh ing ly" fragmentation on decode
+
+    Returns:
+        Trained tokenizer
     """
     tok = Tokenizer(BPE(unk_token="<unk>"))
-    tok.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
-    tok.decoder = ByteLevelDecoder()
+
+    if tokenizer_type == "bytelevel":
+        tok.pre_tokenizer = ByteLevelPreTokenizer(add_prefix_space=False)
+        tok.decoder = ByteLevelDecoder()
+        initial_alphabet = ByteLevelPreTokenizer.alphabet()
+    elif tokenizer_type == "whitespace":
+        tok.pre_tokenizer = WhitespacePreTokenizer()
+        tok.decoder = BPEDecoder()
+        initial_alphabet = []
+    else:
+        raise ValueError(f"Unknown tokenizer_type: {tokenizer_type}. Use 'bytelevel' or 'whitespace'.")
+
     trainer = BpeTrainer(
         vocab_size=vocab_size,
         min_frequency=2,
         special_tokens=["<unk>"],
-        initial_alphabet=ByteLevelPreTokenizer.alphabet()
+        initial_alphabet=initial_alphabet
     )
 
     def line_iter():

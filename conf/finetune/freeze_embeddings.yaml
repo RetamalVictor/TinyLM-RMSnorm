@@ -1,0 +1,6 @@
+# Fine-tune with only embeddings frozen
+checkpoint_path: ???  # Required: path to checkpoint
+
+freeze_embeddings: true
+freeze_head: false
+freeze_layers: []

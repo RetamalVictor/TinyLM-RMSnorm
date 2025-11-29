@@ -2,10 +2,18 @@
 TinyLM Training Script with Hydra + TensorBoard + Checkpointing.
 
 Usage:
+    # Train from scratch
     python train.py                                    # Default config
     python train.py model=medium training=long        # Override configs
-    python train.py training.steps=5000 model.dim=512 # Override params
+    python train.py data=tinystories tokenizer=bytelevel  # Data + tokenizer
+
+    # Resume training (same data, continue from step N)
     python train.py resume.enabled=true resume.checkpoint_path=path/to/ckpt.pt
+
+    # Fine-tune (new data, load weights only, fresh optimizer)
+    python train.py finetune=full finetune.checkpoint_path=path/to/ckpt.pt data=tinystories
+    python train.py finetune=freeze_early finetune.checkpoint_path=path/to/ckpt.pt
+    python train.py finetune=freeze_embeddings finetune.checkpoint_path=path/to/ckpt.pt
 """
 
 import os
@@ -76,10 +84,26 @@ def main(cfg: DictConfig):
 
     # Build or load tokenizer (stored in Hydra output dir)
     tokenizer_path = hydra_dir / "tokenizer.json"
-    if not tokenizer_path.exists():
-        log.info("Building tokenizer...")
-        build_tokenizer([cfg.data.train_path, cfg.data.val_path], str(tokenizer_path))
-    tokenizer = Tokenizer.from_file(str(tokenizer_path))
+
+    # Check if fine-tuning with existing tokenizer
+    finetune_cfg = getattr(cfg, 'finetune', None)
+    if finetune_cfg and finetune_cfg.checkpoint_path:
+        # Load tokenizer from checkpoint (must match!)
+        log.info(f"Loading tokenizer from checkpoint: {finetune_cfg.checkpoint_path}")
+        ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
+        tokenizer = Tokenizer.from_str(ckpt['tokenizer'])
+        tokenizer.save(str(tokenizer_path))
+    elif not tokenizer_path.exists():
+        log.info(f"Building tokenizer (type={cfg.tokenizer.type}, vocab_size={cfg.tokenizer.vocab_size})...")
+        build_tokenizer(
+            [cfg.data.train_path, cfg.data.val_path],
+            str(tokenizer_path),
+            vocab_size=cfg.tokenizer.vocab_size,
+            tokenizer_type=cfg.tokenizer.type
+        )
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+    else:
+        tokenizer = Tokenizer.from_file(str(tokenizer_path))
 
     # Create dataloaders
     train_dl, val_dl = create_dataloaders(
@@ -116,17 +140,56 @@ def main(cfg: DictConfig):
         quant_config=quant_config
     ).to(device)
 
+    # Fine-tuning: load weights and freeze layers
+    if finetune_cfg and finetune_cfg.checkpoint_path:
+        log.info(f"Fine-tuning from checkpoint: {finetune_cfg.checkpoint_path}")
+        if 'ckpt' not in dir():
+            ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
+
+        # Load model weights
+        state_dict = ckpt['model']
+        # Handle compiled model prefix
+        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        model.load_state_dict(state_dict)
+        log.info("Loaded model weights from checkpoint")
+
+        # Freeze layers as specified
+        frozen_params = 0
+        if finetune_cfg.freeze_embeddings:
+            for param in model.tok.parameters():
+                param.requires_grad = False
+                frozen_params += param.numel()
+            log.info("Frozen: embeddings")
+
+        if finetune_cfg.freeze_head:
+            for param in model.head.parameters():
+                param.requires_grad = False
+                frozen_params += param.numel()
+            log.info("Frozen: output head")
+
+        if finetune_cfg.freeze_layers:
+            for layer_idx in finetune_cfg.freeze_layers:
+                if layer_idx < len(model.blocks):
+                    for param in model.blocks[layer_idx].parameters():
+                        param.requires_grad = False
+                        frozen_params += param.numel()
+            log.info(f"Frozen: layers {list(finetune_cfg.freeze_layers)}")
+
+        log.info(f"Frozen parameters: {frozen_params:,}")
+
     if cfg.compile and hasattr(torch, 'compile'):
         log.info("Compiling model with torch.compile...")
         model = torch.compile(model)
 
-    # Count parameters
+    # Count parameters (trainable only when fine-tuning)
     n_params = count_parameters(model)
     log.info(f"Model parameters: {n_params:,} ({n_params/1e6:.2f}M)")
 
-    # Optimizer
+    # Optimizer (only trainable params)
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    log.info(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
     optimizer = AdamW(
-        model.parameters(),
+        trainable_params,
         lr=cfg.training.lr,
         weight_decay=cfg.training.weight_decay,
         betas=tuple(cfg.training.betas)

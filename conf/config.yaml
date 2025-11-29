@@ -2,6 +2,8 @@ defaults:
   - model: small
   - training: default
   - data: tinyshakespeare
+  - tokenizer: bytelevel
+  - finetune: none
   - quant: none
   - _self_
 
