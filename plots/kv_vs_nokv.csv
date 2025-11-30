@@ -1,7 +1,0 @@
-label,mode,steps,dtype,tokens_per_sec
-NVIDIA_GeForce_RTX_2070,with_kv,256,fp16,79.68
-NVIDIA_GeForce_RTX_2070,no_kv,256,fp16,107.87
-NVIDIA_GeForce_RTX_2070,with_kv,256,fp16,101.71
-NVIDIA_GeForce_RTX_2070,no_kv,256,fp16,103.45
-NVIDIA_GeForce_RTX_2070,with_kv,256,fp16,116.46
-NVIDIA_GeForce_RTX_2070,no_kv,256,fp16,111.54
