@@ -1,6 +1,6 @@
 """KV-cache utilities for efficient autoregressive generation."""
 
-from typing import Dict
+from typing import Dict, List
 import torch
 
 
@@ -10,8 +10,9 @@ def prealloc_kvcache(
     n_heads: int,
     head_dim: int,
     device: torch.device,
-    dtype: torch.dtype
-) -> Dict[str, torch.Tensor]:
+    dtype: torch.dtype,
+    n_layers: int = 1
+) -> List[Dict[str, torch.Tensor]]:
     """Pre-allocate KV-cache tensors for efficient autoregressive generation.
 
     The KV-cache stores key and value tensors from previous timesteps to avoid
@@ -25,11 +26,15 @@ def prealloc_kvcache(
         head_dim: Dimension of each attention head
         device: Device to allocate tensors on
         dtype: Data type for tensors (e.g., float16 for memory efficiency)
+        n_layers: Number of transformer layers (each needs its own cache)
 
     Returns:
-        Dictionary with 'k' and 'v' keys containing pre-allocated tensors
-        of shape [batch_size, n_heads, max_seq, head_dim]
+        List of dictionaries (one per layer), each with 'k' and 'v' keys
+        containing pre-allocated tensors of shape [batch_size, n_heads, max_seq, head_dim]
     """
-    k = torch.empty(B, n_heads, max_seq, head_dim, device=device, dtype=dtype)
-    v = torch.empty(B, n_heads, max_seq, head_dim, device=device, dtype=dtype)
-    return {'k': k, 'v': v}
+    caches = []
+    for _ in range(n_layers):
+        k = torch.empty(B, n_heads, max_seq, head_dim, device=device, dtype=dtype)
+        v = torch.empty(B, n_heads, max_seq, head_dim, device=device, dtype=dtype)
+        caches.append({'k': k, 'v': v})
+    return caches

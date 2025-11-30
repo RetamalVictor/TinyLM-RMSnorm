@@ -73,7 +73,8 @@ def generate(
     cache = prealloc_kvcache(
         1, ids.size(1) + max_new_tokens,
         model.n_heads, model.dim // model.n_heads,
-        device, dtype=next(model.parameters()).dtype
+        device, dtype=next(model.parameters()).dtype,
+        n_layers=model.n_layers
     )
 
     recent_window = 512

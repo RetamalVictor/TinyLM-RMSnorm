@@ -1,6 +1,6 @@
 """Transformer model components for TinyLM."""
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -55,7 +55,9 @@ class MHA(nn.Module):
             k = cache['k'][:, :, :start_pos+T]
             v = cache['v'][:, :, :start_pos+T]
 
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+        # Only use causal mask for multi-token sequences (prefill)
+        # Single-token generation (T=1) doesn't need masking - it attends to all cached positions
+        attn = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))
         y = attn.transpose(1, 2).contiguous().view(B, T, C)
         y = self.proj(y)
         return self.dropout(y)
@@ -127,6 +129,7 @@ class TinyLM(nn.Module):
         self.head = make_linear(dim, vocab_size, bias=False, quant_config=quant_config, layer_type="head")
         self.dim = dim
         self.n_heads = n_heads
+        self.n_layers = n_layers
         self.dropout = dropout
         self.quant_config = quant_config
 
@@ -135,12 +138,13 @@ class TinyLM(nn.Module):
         idx: torch.Tensor,
         sin: torch.Tensor,
         cos: torch.Tensor,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
+        cache: Optional[List[Dict[str, torch.Tensor]]] = None,
         start_pos: int = 0
     ) -> torch.Tensor:
         x = self.tok(idx)
         x = self.tok_dropout(x)
-        for blk in self.blocks:
-            x = blk(x, sin, cos, cache, start_pos)
+        for i, blk in enumerate(self.blocks):
+            layer_cache = cache[i] if cache is not None else None
+            x = blk(x, sin, cos, layer_cache, start_pos)
         x = self.norm(x)
         return self.head(x)
