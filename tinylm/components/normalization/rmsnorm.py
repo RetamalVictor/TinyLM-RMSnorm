@@ -4,6 +4,8 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
+from tinylm.components.registry import NORM_REGISTRY
+
 # Try to import CUDA module, fallback to CPU implementation if not available
 try:
     from tinylm._ext import rmsnorm_cuda, HAS_RMSNORM_CUDA
@@ -13,13 +15,6 @@ try:
 except ImportError:
     rmsnorm_cuda = None
     HAS_CUDA_KERNEL = False
-    import warnings
-    warnings.warn(
-        "CUDA RMSNorm kernel not found. Falling back to PyTorch implementation. "
-        "To enable CUDA kernel, run: uv run python setup.py build_ext --inplace",
-        RuntimeWarning,
-        stacklevel=2
-    )
 
 
 class RMSNormCUDAFn(torch.autograd.Function):
@@ -43,17 +38,21 @@ class RMSNormCUDAFn(torch.autograd.Function):
         return dx, dw, None
 
 
-class RMSNormCUDA(nn.Module):
+@NORM_REGISTRY.register("rmsnorm")
+class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization with optional CUDA acceleration.
 
     Automatically uses the custom CUDA kernel when available and running on GPU,
     otherwise falls back to a PyTorch native implementation.
+
+    Used by: LLaMA, Mistral
     """
 
     def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.weight = nn.Parameter(torch.ones(dim))
         self.eps = eps
+        self.dim = dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         if HAS_CUDA_KERNEL and x.is_cuda:
@@ -61,3 +60,4 @@ class RMSNormCUDA(nn.Module):
         else:
             rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
             return x * rms * self.weight
+

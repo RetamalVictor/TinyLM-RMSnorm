@@ -1,112 +1,32 @@
-"""Transformer model components for TinyLM."""
+"""Transformer model for TinyLM."""
 
 from typing import Optional, Dict, List
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from tinylm.model.normalization import RMSNormCUDA
-from tinylm.model.rope import rotary_embeddings
+from tinylm.architectures import ArchitectureConfig, get_architecture
+from tinylm.components import (
+    build_norm,
+    build_pos_emb,
+    PositionalContext,
+)
+from tinylm.model.blocks import build_block
+from tinylm.inference.kv_cache import prealloc_kvcache
 from tinylm.quant import QuantConfig, make_linear
 
 
-class MHA(nn.Module):
-    """Multi-Head Attention with RoPE and KV-cache support."""
-
-    def __init__(
-        self,
-        dim: int,
-        n_heads: int,
-        dropout: float = 0.0,
-        quant_config: Optional[QuantConfig] = None
-    ):
-        super().__init__()
-        assert dim % n_heads == 0, f"dim {dim} must be divisible by n_heads {n_heads}"
-        self.nh = n_heads
-        self.dim = dim
-        self.qkv = make_linear(dim, dim * 3, bias=False, quant_config=quant_config, layer_type="attention")
-        self.proj = make_linear(dim, dim, bias=False, quant_config=quant_config, layer_type="attention")
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
-        start_pos: int = 0
-    ) -> torch.Tensor:
-        B, T, C = x.shape
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        q = q.view(B, T, self.nh, C // self.nh).transpose(1, 2)
-        k = k.view(B, T, self.nh, C // self.nh).transpose(1, 2)
-        v = v.view(B, T, self.nh, C // self.nh).transpose(1, 2)
-
-        q = rotary_embeddings(q, sin[:, :, start_pos:start_pos+T, :],
-                            cos[:, :, start_pos:start_pos+T, :])
-        k = rotary_embeddings(k, sin[:, :, start_pos:start_pos+T, :],
-                            cos[:, :, start_pos:start_pos+T, :])
-
-        if cache is not None:
-            cache['k'][:, :, start_pos:start_pos+T] = k
-            cache['v'][:, :, start_pos:start_pos+T] = v
-            k = cache['k'][:, :, :start_pos+T]
-            v = cache['v'][:, :, :start_pos+T]
-
-        # Only use causal mask for multi-token sequences (prefill)
-        # Single-token generation (T=1) doesn't need masking - it attends to all cached positions
-        attn = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))
-        y = attn.transpose(1, 2).contiguous().view(B, T, C)
-        y = self.proj(y)
-        return self.dropout(y)
-
-
-class Block(nn.Module):
-    """Transformer block with pre-normalization and SiLU activation."""
-
-    def __init__(
-        self,
-        dim: int,
-        n_heads: int,
-        mlp_ratio: int = 4,
-        dropout: float = 0.0,
-        quant_config: Optional[QuantConfig] = None
-    ):
-        super().__init__()
-        self.norm1 = RMSNormCUDA(dim)
-        self.attn = MHA(dim, n_heads, dropout=dropout, quant_config=quant_config)
-        self.norm2 = RMSNormCUDA(dim)
-        self.mlp = nn.Sequential(
-            make_linear(dim, mlp_ratio*dim, bias=False, quant_config=quant_config, layer_type="mlp"),
-            nn.SiLU(),
-            nn.Dropout(dropout),
-            make_linear(mlp_ratio*dim, dim, bias=False, quant_config=quant_config, layer_type="mlp"),
-            nn.Dropout(dropout)
-        )
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
-        start_pos: int = 0
-    ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), sin, cos, cache, start_pos)
-        x = x + self.mlp(self.norm2(x))
-        return x
-
-
 class TinyLM(nn.Module):
-    """Small-scale GPT-style language model with custom RMSNorm.
+    """Multi-architecture language model.
+
+    Supports different architectures by composing building blocks:
+    - LLaMA: RMSNorm (pre), RoPE, SiLU, Gated MLP
+    - GPT: LayerNorm (post), Learned pos emb, GELU, Standard MLP
 
     Features:
-        - Custom CUDA RMSNorm for improved performance
-        - Rotary Position Embeddings (no learned position embeddings)
+        - Configurable architecture via ArchitectureConfig
+        - Internal positional embedding handling (clean API)
         - KV-cache support for efficient generation
-        - Optional ternary quantization
+        - Optional quantization
     """
 
     def __init__(
@@ -115,36 +35,187 @@ class TinyLM(nn.Module):
         dim: int = 384,
         n_layers: int = 6,
         n_heads: int = 6,
+        max_seq_len: int = 4096,
         dropout: float = 0.0,
-        quant_config: Optional[QuantConfig] = None
+        architecture: str = "llama",
+        arch_config: Optional[ArchitectureConfig] = None,
+        quant_config: Optional[QuantConfig] = None,
     ):
         super().__init__()
+
+        # Get architecture config
+        if arch_config is not None:
+            self.arch = arch_config
+        else:
+            self.arch = get_architecture(architecture)
+
+        # Store model configuration
+        self.vocab_size = vocab_size
+        self.dim = dim
+        self.n_layers = n_layers
+        self.n_heads = n_heads
+        self.max_seq_len = max_seq_len
+        self.dropout_rate = dropout
+        self.quant_config = quant_config
+
+        # Derived values
+        self.head_dim = dim // n_heads
+
+        # Token embeddings
         self.tok = nn.Embedding(vocab_size, dim)
         self.tok_dropout = nn.Dropout(dropout)
+
+        # Positional embeddings
+        pos_dim = self.head_dim if self.arch.pos_emb_type == "rope" else dim
+        self.pos_emb = build_pos_emb(
+            self.arch.pos_emb_type,
+            dim=pos_dim,
+            max_seq_len=max_seq_len,
+            base=self.arch.rope_base,
+        )
+
+        # Transformer blocks
         self.blocks = nn.ModuleList([
-            Block(dim, n_heads, dropout=dropout, quant_config=quant_config)
+            build_block(
+                norm_position=self.arch.norm_position,
+                dim=dim,
+                n_heads=n_heads,
+                n_kv_heads=self.arch.n_kv_heads,
+                norm_type=self.arch.norm_type,
+                attention_type=self.arch.attention_type,
+                mlp_type=self.arch.mlp_type,
+                activation=self.arch.activation,
+                mlp_ratio=self.arch.mlp_ratio,
+                dropout=dropout,
+                bias=self.arch.use_bias,
+                norm_eps=self.arch.norm_eps,
+                quant_config=quant_config,
+                pos_emb=self.pos_emb if self.arch.pos_emb_type == "rope" else None,
+            )
             for _ in range(n_layers)
         ])
-        self.norm = RMSNormCUDA(dim)
-        self.head = make_linear(dim, vocab_size, bias=False, quant_config=quant_config, layer_type="head")
-        self.dim = dim
-        self.n_heads = n_heads
-        self.n_layers = n_layers
-        self.dropout = dropout
-        self.quant_config = quant_config
+
+        # Final normalization
+        self.norm = build_norm(
+            self.arch.norm_type,
+            dim,
+            eps=self.arch.norm_eps,
+        )
+
+        # Output head
+        self.head = make_linear(
+            dim, vocab_size, bias=False,
+            quant_config=quant_config, layer_type="head"
+        )
+
+        # Precompute positional info and register as buffer
+        self._init_pos_cache()
+
+    def _init_pos_cache(self):
+        """Initialize positional embedding cache."""
+        pos_cache = self.pos_emb.precompute(self.max_seq_len, torch.device('cpu'))
+        for key, tensor in pos_cache.items():
+            self.register_buffer(f'_pos_{key}', tensor, persistent=False)
+
+    def _get_pos_ctx(
+        self,
+        seq_len: int,
+        start_pos: int,
+        device: torch.device,
+    ) -> PositionalContext:
+        """Build positional context for forward pass."""
+        ctx = PositionalContext(
+            seq_len=seq_len,
+            start_pos=start_pos,
+            device=device,
+        )
+
+        # Add cached positional values
+        if hasattr(self, '_pos_sin'):
+            ctx.sin = self._pos_sin.to(device)
+            ctx.cos = self._pos_cos.to(device)
+        if hasattr(self, '_pos_positions'):
+            ctx.positions = self._pos_positions.to(device)
+
+        return ctx
 
     def forward(
         self,
         idx: torch.Tensor,
-        sin: torch.Tensor,
-        cos: torch.Tensor,
         cache: Optional[List[Dict[str, torch.Tensor]]] = None,
-        start_pos: int = 0
+        start_pos: int = 0,
     ) -> torch.Tensor:
+        """Forward pass.
+
+        Args:
+            idx: Token indices [batch, seq_len]
+            cache: Optional list of KV caches (one per layer)
+            start_pos: Starting position for generation
+
+        Returns:
+            Logits [batch, seq_len, vocab_size]
+        """
+        B, T = idx.shape
+
+        # Token embeddings
         x = self.tok(idx)
         x = self.tok_dropout(x)
-        for i, blk in enumerate(self.blocks):
+
+        # Add learned positional embeddings if applicable
+        if self.arch.pos_emb_type == "learned":
+            pos_ctx = self._get_pos_ctx(T, start_pos, idx.device)
+            x = x + self.pos_emb.apply(x, pos_ctx)
+
+        # Build positional context for attention
+        pos_ctx = self._get_pos_ctx(T, start_pos, idx.device)
+
+        # Forward through blocks
+        for i, block in enumerate(self.blocks):
             layer_cache = cache[i] if cache is not None else None
-            x = blk(x, sin, cos, layer_cache, start_pos)
+            x = block(x, pos_ctx, layer_cache, start_pos)
+
+        # Final norm and head
         x = self.norm(x)
         return self.head(x)
+
+    def create_kv_cache(
+        self,
+        batch_size: int,
+        max_seq_len: Optional[int] = None,
+        device: Optional[torch.device] = None,
+        dtype: Optional[torch.dtype] = None,
+    ) -> List[Dict[str, torch.Tensor]]:
+        """Create KV cache for generation.
+
+        Args:
+            batch_size: Batch size
+            max_seq_len: Maximum sequence length (defaults to self.max_seq_len)
+            device: Device for cache tensors
+            dtype: Data type for cache tensors
+
+        Returns:
+            List of cache dicts, one per layer
+        """
+        if max_seq_len is None:
+            max_seq_len = self.max_seq_len
+        if device is None:
+            device = next(self.parameters()).device
+        if dtype is None:
+            dtype = next(self.parameters()).dtype
+
+        return prealloc_kvcache(
+            B=batch_size,
+            max_seq=max_seq_len,
+            n_heads=self.n_heads,
+            head_dim=self.head_dim,
+            device=device,
+            dtype=dtype,
+            n_layers=self.n_layers,
+        )
+
+    def get_num_params(self) -> int:
+        """Count total parameters."""
+        return sum(p.numel() for p in self.parameters())
+
+
+__all__ = ["TinyLM"]

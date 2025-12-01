@@ -37,13 +37,12 @@ def reset_shutdown_flag():
 
 
 @torch.no_grad()
-def evaluate(model, dataloader, sin, cos, device, use_amp=False, max_batches=None, log_progress=False):
+def evaluate(model, dataloader, device, use_amp=False, max_batches=None, log_progress=False):
     """Evaluate model on validation set.
 
     Args:
         model: The model to evaluate
         dataloader: Validation data loader
-        sin, cos: RoPE embeddings
         device: Device to run on
         use_amp: Whether to use automatic mixed precision
         max_batches: Maximum batches to evaluate (None for all)
@@ -69,12 +68,12 @@ def evaluate(model, dataloader, sin, cos, device, use_amp=False, max_batches=Non
 
         if use_amp and device == 'cuda':
             with torch.cuda.amp.autocast():
-                logits = model(x, sin, cos)
+                logits = model(x)
                 loss = nn.functional.cross_entropy(
                     logits.view(-1, logits.size(-1)), y.view(-1)
                 )
         else:
-            logits = model(x, sin, cos)
+            logits = model(x)
             loss = nn.functional.cross_entropy(
                 logits.view(-1, logits.size(-1)), y.view(-1)
             )

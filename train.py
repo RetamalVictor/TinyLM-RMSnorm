@@ -30,7 +30,8 @@ from tqdm import tqdm
 import hydra
 from omegaconf import DictConfig, OmegaConf
 
-from tinylm import TinyLM, build_sincos
+from tinylm import TinyLM
+from tinylm.architectures import get_architecture, ArchitectureConfig
 from tinylm.quant import QuantConfig
 from tinylm.training import (
     build_tokenizer,
@@ -85,13 +86,14 @@ def main(cfg: DictConfig):
     # Build or load tokenizer (stored in Hydra output dir)
     tokenizer_path = hydra_dir / "tokenizer.json"
 
-    # Check if fine-tuning with existing tokenizer
+    # Check if fine-tuning - load checkpoint once for tokenizer and arch_config
     finetune_cfg = getattr(cfg, 'finetune', None)
+    finetune_ckpt = None
     if finetune_cfg and finetune_cfg.checkpoint_path:
+        log.info(f"Loading checkpoint for fine-tuning: {finetune_cfg.checkpoint_path}")
+        finetune_ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
         # Load tokenizer from checkpoint (must match!)
-        log.info(f"Loading tokenizer from checkpoint: {finetune_cfg.checkpoint_path}")
-        ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
-        tokenizer = Tokenizer.from_str(ckpt['tokenizer'])
+        tokenizer = Tokenizer.from_str(finetune_ckpt['tokenizer'])
         tokenizer.save(str(tokenizer_path))
     elif not tokenizer_path.exists():
         log.info(f"Building tokenizer (type={cfg.tokenizer.type}, vocab_size={cfg.tokenizer.vocab_size})...")
@@ -130,24 +132,39 @@ def main(cfg: DictConfig):
         )
         log.info(f"Ternary quantization enabled: {quant_config}")
 
+    # Get architecture config
+    arch_name = cfg.model.get('architecture', 'llama')
+    if finetune_ckpt is not None:
+        if 'arch_config' in finetune_ckpt:
+            arch_config = ArchitectureConfig.from_dict(finetune_ckpt['arch_config'])
+            arch_name = arch_config.name
+        else:
+            # Legacy checkpoint without arch_config - assume llama
+            arch_config = get_architecture('llama')
+            arch_name = 'llama'
+            log.warning("Checkpoint missing arch_config, assuming llama architecture")
+    else:
+        arch_config = get_architecture(arch_name)
+    log.info(f"Architecture: {arch_config}")
+
     # Create model
     model = TinyLM(
         vocab_size=tokenizer.get_vocab_size(),
         dim=cfg.model.dim,
         n_layers=cfg.model.n_layers,
         n_heads=cfg.model.n_heads,
+        max_seq_len=cfg.model.max_seq_len,
         dropout=cfg.model.dropout,
-        quant_config=quant_config
+        arch_config=arch_config,
+        quant_config=quant_config,
     ).to(device)
 
     # Fine-tuning: load weights and freeze layers
-    if finetune_cfg and finetune_cfg.checkpoint_path:
-        log.info(f"Fine-tuning from checkpoint: {finetune_cfg.checkpoint_path}")
-        if 'ckpt' not in dir():
-            ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
+    if finetune_ckpt is not None:
+        log.info(f"Loading model weights for fine-tuning...")
 
         # Load model weights
-        state_dict = ckpt['model']
+        state_dict = finetune_ckpt['model']
         # Handle compiled model prefix
         state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
@@ -217,9 +234,6 @@ def main(cfg: DictConfig):
     # Mixed precision scaler
     scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.mixed_precision) if device == 'cuda' else None
 
-    # RoPE embeddings
-    sin, cos = build_sincos(cfg.model.max_seq_len, cfg.model.dim // cfg.model.n_heads, device)
-
     # Resume from checkpoint if specified
     start_step = 0
     best_val_loss = float('inf')
@@ -253,7 +267,7 @@ def main(cfg: DictConfig):
     max_eval_batches = cfg.logging.get('max_eval_batches', None)
     if start_step == 0:
         log.info(f"Running initial validation (max_batches={max_eval_batches})...")
-        val_loss, val_ppl = evaluate(model, val_dl, sin, cos, device, use_amp=cfg.training.mixed_precision, max_batches=max_eval_batches)
+        val_loss, val_ppl = evaluate(model, val_dl, device, use_amp=cfg.training.mixed_precision, max_batches=max_eval_batches)
         metrics_logger.log_scalar('val/loss', val_loss, 0)
         metrics_logger.log_scalar('val/perplexity', val_ppl, 0)
         metrics_logger.flush()
@@ -274,6 +288,7 @@ def main(cfg: DictConfig):
                 'config': OmegaConf.to_container(cfg, resolve=True),
                 'tokenizer': tokenizer.to_str(),
                 'quant_config': quant_config.to_dict() if quant_config else None,
+                'arch_config': arch_config.to_dict(),
             }
             ckpt_manager.save(state, step, is_best=False)
             break
@@ -295,14 +310,14 @@ def main(cfg: DictConfig):
         try:
             if cfg.training.mixed_precision and scaler is not None:
                 with torch.cuda.amp.autocast():
-                    logits = model(x, sin, cos)
+                    logits = model(x)
                     loss = nn.functional.cross_entropy(
                         logits.view(-1, logits.size(-1)), y.view(-1)
                     )
                     loss = loss / cfg.training.grad_accum_steps
                 scaler.scale(loss).backward()
             else:
-                logits = model(x, sin, cos)
+                logits = model(x)
                 loss = nn.functional.cross_entropy(
                     logits.view(-1, logits.size(-1)), y.view(-1)
                 )
@@ -364,7 +379,7 @@ def main(cfg: DictConfig):
             # Validation
             if optimizer_step % cfg.logging.eval_every == 0 and optimizer_step > 0:
                 val_loss, val_ppl = evaluate(
-                    model, val_dl, sin, cos, device,
+                    model, val_dl, device,
                     use_amp=cfg.training.mixed_precision,
                     max_batches=max_eval_batches
                 )
@@ -389,6 +404,7 @@ def main(cfg: DictConfig):
                         'config': OmegaConf.to_container(cfg, resolve=True),
                         'tokenizer': tokenizer.to_str(),
                         'quant_config': quant_config.to_dict() if quant_config else None,
+                        'arch_config': arch_config.to_dict(),
                     }
                     ckpt_manager.save(state, step, is_best=True)
 
@@ -409,6 +425,7 @@ def main(cfg: DictConfig):
                     'config': OmegaConf.to_container(cfg, resolve=True),
                     'tokenizer': tokenizer.to_str(),
                     'quant_config': quant_config.to_dict() if quant_config else None,
+                    'arch_config': arch_config.to_dict(),
                 }
                 ckpt_manager.save(state, step, is_best=False)
 
@@ -421,7 +438,7 @@ def main(cfg: DictConfig):
     final_eval_batches = max_eval_batches * 5 if max_eval_batches else 500  # 5x normal or 500
     log.info(f"Running final evaluation (max_batches={final_eval_batches})...")
     final_val_loss, final_val_ppl = evaluate(
-        model, val_dl, sin, cos, device,
+        model, val_dl, device,
         use_amp=cfg.training.mixed_precision,
         max_batches=final_eval_batches,
         log_progress=True
@@ -434,6 +451,7 @@ def main(cfg: DictConfig):
         'model/dim': cfg.model.dim,
         'model/n_layers': cfg.model.n_layers,
         'model/n_heads': cfg.model.n_heads,
+        'model/architecture': arch_name,
         'training/lr': cfg.training.lr,
         'training/batch_size': cfg.training.batch_size,
         'training/steps': cfg.training.steps,

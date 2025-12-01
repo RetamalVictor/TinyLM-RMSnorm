@@ -1,11 +1,12 @@
 """Text generation utilities for TinyLM."""
 
 import random
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import torch
 from tokenizers import Tokenizer
 
-from tinylm.model import TinyLM, build_sincos, prealloc_kvcache
+if TYPE_CHECKING:
+    from tinylm.model.transformer import TinyLM
 
 
 def sample_top_p(logits: torch.Tensor, top_p: float = 0.9) -> torch.Tensor:
@@ -32,7 +33,7 @@ def sample_top_p(logits: torch.Tensor, top_p: float = 0.9) -> torch.Tensor:
 
 @torch.no_grad()
 def generate(
-    model: TinyLM,
+    model: "TinyLM",
     tok: Tokenizer,
     prompt: str,
     max_new_tokens: int = 128,
@@ -68,20 +69,18 @@ def generate(
         torch.cuda.manual_seed_all(seed)
 
     device = next(model.parameters()).device
-    sin, cos = build_sincos(8192, model.dim // model.n_heads, device)
     ids = torch.tensor(tok.encode(prompt).ids, device=device).unsqueeze(0)
-    cache = prealloc_kvcache(
-        1, ids.size(1) + max_new_tokens,
-        model.n_heads, model.dim // model.n_heads,
-        device, dtype=next(model.parameters()).dtype,
-        n_layers=model.n_layers
+
+    # Create KV cache for generation
+    cache = model.create_kv_cache(
+        batch_size=1,
+        max_seq_len=ids.size(1) + max_new_tokens,
     )
 
     recent_window = 512
 
     # Process full prompt first to fill KV cache
-    prompt_len = ids.size(1)
-    logits = model(ids, sin, cos, cache, start_pos=0)
+    logits = model(ids, cache=cache, start_pos=0)
     logits = logits[:, -1, :]
 
     for _ in range(max_new_tokens):
@@ -111,7 +110,7 @@ def generate(
             print(tok.decode(ids[0].tolist()), flush=True)
 
         # Compute logits for next iteration (single token with KV cache)
-        logits = model(next_id, sin, cos, cache, start_pos=ids.size(1)-1)
+        logits = model(next_id, cache=cache, start_pos=ids.size(1)-1)
         logits = logits[:, -1, :]
 
     return tok.decode(ids[0].tolist())
