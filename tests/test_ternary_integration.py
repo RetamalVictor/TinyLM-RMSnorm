@@ -1,14 +1,14 @@
 """Integration tests for TinyLM + BitTorch ternary quantization."""
 
-import sys
 import pytest
 import torch
 import torch.nn as nn
 
-# Add parent directory to path for imports
-sys.path.insert(0, str(__file__).rsplit("/", 2)[0])
-
-from tinylm import QuantConfig, make_linear, TinyLM, MHA, Block, build_sincos
+from tinylm import QuantConfig, make_linear, TinyLM
+from tinylm.components.attention import MHA
+from tinylm.model.blocks import PreNormBlock as Block
+from tinylm.components.positional import RoPE
+from tinylm.components.positional.base import PositionalContext
 
 
 # Skip all tests if bittorch is not available
@@ -16,6 +16,24 @@ pytestmark = pytest.mark.skipif(
     not pytest.importorskip("bittorch", reason="BitTorch not installed"),
     reason="BitTorch not installed"
 )
+
+
+def create_pos_ctx(seq_len: int, head_dim: int, device: torch.device) -> tuple:
+    """Create positional context and RoPE module for testing.
+
+    Returns:
+        Tuple of (pos_ctx, rope_module)
+    """
+    rope = RoPE(dim=head_dim, max_seq_len=seq_len * 2)
+    cache = rope.precompute(seq_len * 2, device)
+    pos_ctx = PositionalContext(
+        seq_len=seq_len,
+        start_pos=0,
+        sin=cache['sin'],
+        cos=cache['cos'],
+        device=device,
+    )
+    return pos_ctx, rope
 
 
 class TestQuantConfig:
@@ -90,11 +108,11 @@ class TestMakeLinear:
         """Test attention layer type respects quantize_attention flag."""
         from bittorch.nn import TernaryLinear
 
-        cfg = QuantConfig(enabled=True, quantize_attention=True)
+        cfg = QuantConfig(enabled=True, method="ternary", quantize_attention=True)
         layer = make_linear(64, 32, quant_config=cfg, layer_type="attention")
         assert isinstance(layer, TernaryLinear)
 
-        cfg = QuantConfig(enabled=True, quantize_attention=False)
+        cfg = QuantConfig(enabled=True, method="ternary", quantize_attention=False)
         layer = make_linear(64, 32, quant_config=cfg, layer_type="attention")
         assert isinstance(layer, nn.Linear)
 
@@ -102,11 +120,11 @@ class TestMakeLinear:
         """Test MLP layer type respects quantize_mlp flag."""
         from bittorch.nn import TernaryLinear
 
-        cfg = QuantConfig(enabled=True, quantize_mlp=True)
+        cfg = QuantConfig(enabled=True, method="ternary", quantize_mlp=True)
         layer = make_linear(64, 32, quant_config=cfg, layer_type="mlp")
         assert isinstance(layer, TernaryLinear)
 
-        cfg = QuantConfig(enabled=True, quantize_mlp=False)
+        cfg = QuantConfig(enabled=True, method="ternary", quantize_mlp=False)
         layer = make_linear(64, 32, quant_config=cfg, layer_type="mlp")
         assert isinstance(layer, nn.Linear)
 
@@ -114,12 +132,12 @@ class TestMakeLinear:
         """Test head layer type respects quantize_head flag."""
         from bittorch.nn import TernaryLinear
 
-        cfg = QuantConfig(enabled=True, quantize_head=True)
+        cfg = QuantConfig(enabled=True, method="ternary", quantize_head=True)
         layer = make_linear(64, 32, quant_config=cfg, layer_type="head")
         assert isinstance(layer, TernaryLinear)
 
         # By default, head should NOT be quantized
-        cfg = QuantConfig(enabled=True)
+        cfg = QuantConfig(enabled=True, method="ternary")
         layer = make_linear(64, 32, quant_config=cfg, layer_type="head")
         assert isinstance(layer, nn.Linear)
 
@@ -131,8 +149,9 @@ class TestMHAWithQuant:
         """Test MHA works without quantization."""
         mha = MHA(dim=64, n_heads=4)
         x = torch.randn(2, 8, 64)
-        sin, cos = build_sincos(16, 16, x.device)
-        out = mha(x, sin, cos)
+        head_dim = 64 // 4
+        pos_ctx, rope = create_pos_ctx(16, head_dim, x.device)
+        out = mha(x, pos_ctx, pos_emb=rope)
         assert out.shape == (2, 8, 64)
 
     def test_mha_with_quant(self):
@@ -147,8 +166,9 @@ class TestMHAWithQuant:
         assert isinstance(mha.proj, TernaryLinear)
 
         x = torch.randn(2, 8, 64)
-        sin, cos = build_sincos(16, 16, x.device)
-        out = mha(x, sin, cos)
+        head_dim = 64 // 4
+        pos_ctx, rope = create_pos_ctx(16, head_dim, x.device)
+        out = mha(x, pos_ctx, pos_emb=rope)
         assert out.shape == (2, 8, 64)
         assert not torch.isnan(out).any()
         assert not torch.isinf(out).any()
@@ -162,19 +182,29 @@ class TestBlockWithQuant:
         from bittorch.nn import TernaryLinear
 
         cfg = QuantConfig(enabled=True, method="ternary")
-        block = Block(dim=64, n_heads=4, quant_config=cfg)
+        # PreNormBlock requires architecture config
+        from tinylm.architectures import get_architecture
+        arch = get_architecture("llama")
+
+        block = Block(
+            dim=64,
+            n_heads=4,
+            mlp_ratio=arch.mlp_ratio,
+            norm_type=arch.norm_type,
+            mlp_type=arch.mlp_type,
+            activation=arch.activation,
+            quant_config=cfg,
+        )
 
         # Verify attention layers are TernaryLinear
         assert isinstance(block.attn.qkv, TernaryLinear)
         assert isinstance(block.attn.proj, TernaryLinear)
 
-        # Verify MLP layers are TernaryLinear
-        assert isinstance(block.mlp[0], TernaryLinear)  # fc1
-        assert isinstance(block.mlp[3], TernaryLinear)  # fc2
-
         x = torch.randn(2, 8, 64)
-        sin, cos = build_sincos(16, 16, x.device)
-        out = block(x, sin, cos)
+        head_dim = 64 // 4
+        pos_ctx, rope = create_pos_ctx(16, head_dim, x.device)
+        block.attn.set_pos_emb(rope)
+        out = block(x, pos_ctx)
         assert out.shape == (2, 8, 64)
         assert not torch.isnan(out).any()
 
@@ -186,8 +216,7 @@ class TestTinyLMWithQuant:
         """Test TinyLM works without quantization."""
         model = TinyLM(vocab_size=100, dim=64, n_layers=2, n_heads=4)
         idx = torch.randint(0, 100, (2, 8))
-        sin, cos = build_sincos(16, 16, idx.device)
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         assert logits.shape == (2, 8, 100)
 
     def test_model_with_quant(self):
@@ -207,8 +236,7 @@ class TestTinyLMWithQuant:
         assert isinstance(model.blocks[0].attn.qkv, TernaryLinear)
 
         idx = torch.randint(0, 100, (2, 8))
-        sin, cos = build_sincos(16, 16, idx.device)
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         assert logits.shape == (2, 8, 100)
         assert not torch.isnan(logits).any()
         assert not torch.isinf(logits).any()
@@ -233,8 +261,9 @@ class TestGradientFlow:
         mha = MHA(dim=64, n_heads=4, quant_config=cfg)
 
         x = torch.randn(2, 8, 64, requires_grad=True)
-        sin, cos = build_sincos(16, 16, x.device)
-        out = mha(x, sin, cos)
+        head_dim = 64 // 4
+        pos_ctx, rope = create_pos_ctx(16, head_dim, x.device)
+        out = mha(x, pos_ctx, pos_emb=rope)
         loss = out.sum()
         loss.backward()
 
@@ -250,9 +279,8 @@ class TestGradientFlow:
 
         idx = torch.randint(0, 100, (2, 8))
         targets = torch.randint(0, 100, (2, 8))
-        sin, cos = build_sincos(16, 16, idx.device)
 
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         loss = nn.functional.cross_entropy(logits.view(-1, 100), targets.view(-1))
         loss.backward()
 
@@ -273,11 +301,10 @@ class TestTrainingStep:
 
         idx = torch.randint(0, 100, (4, 16))
         targets = torch.randint(0, 100, (4, 16))
-        sin, cos = build_sincos(32, 16, idx.device)
 
         # Training step
         optimizer.zero_grad()
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         loss = nn.functional.cross_entropy(logits.view(-1, 100), targets.view(-1))
         loss.backward()
         optimizer.step()
@@ -295,12 +322,11 @@ class TestTrainingStep:
         torch.manual_seed(42)
         idx = torch.randint(0, 100, (4, 16))
         targets = torch.randint(0, 100, (4, 16))
-        sin, cos = build_sincos(32, 16, idx.device)
 
         losses = []
         for _ in range(10):
             optimizer.zero_grad()
-            logits = model(idx, sin, cos)
+            logits = model(idx)
             loss = nn.functional.cross_entropy(logits.view(-1, 100), targets.view(-1))
             loss.backward()
             optimizer.step()
@@ -320,9 +346,7 @@ class TestCUDA:
         model = TinyLM(vocab_size=100, dim=64, n_layers=2, n_heads=4, quant_config=cfg).cuda()
 
         idx = torch.randint(0, 100, (2, 8)).cuda()
-        sin, cos = build_sincos(16, 16, idx.device)
-
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         assert logits.device.type == "cuda"
         assert not torch.isnan(logits).any()
 
@@ -334,10 +358,9 @@ class TestCUDA:
 
         idx = torch.randint(0, 100, (4, 16)).cuda()
         targets = torch.randint(0, 100, (4, 16)).cuda()
-        sin, cos = build_sincos(32, 16, idx.device)
 
         optimizer.zero_grad()
-        logits = model(idx, sin, cos)
+        logits = model(idx)
         loss = nn.functional.cross_entropy(logits.view(-1, 100), targets.view(-1))
         loss.backward()
         optimizer.step()

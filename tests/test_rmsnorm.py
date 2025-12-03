@@ -1,10 +1,27 @@
-import torch
-from model import RMSNormCUDA
+"""Tests for RMSNorm CUDA kernel."""
 
-def test_forward_close():
+import pytest
+import torch
+
+# Skip all tests if CUDA is not available
+pytestmark = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="CUDA not available"
+)
+
+
+@pytest.fixture
+def rmsnorm_cuda():
+    """Import RMSNorm with CUDA backend."""
+    from tinylm.components.normalization import RMSNorm
+    return RMSNorm
+
+
+def test_forward_close(rmsnorm_cuda):
+    """Test forward pass matches reference implementation."""
     torch.manual_seed(0)
-    B,T,C = 4,8,64
-    x = torch.randn(B,T,C, device='cuda', dtype=torch.float32, requires_grad=True)
+    B, T, C = 4, 8, 64
+    x = torch.randn(B, T, C, device='cuda', dtype=torch.float32, requires_grad=True)
     w = torch.randn(C, device='cuda', dtype=torch.float32)
 
     # Reference
@@ -12,19 +29,21 @@ def test_forward_close():
         rms = (x.detach()**2).mean(dim=-1, keepdim=True).add(1e-6).rsqrt()
     y_ref = x * rms * w
 
-    mod = RMSNormCUDA(C).cuda().float()
+    mod = rmsnorm_cuda(C).cuda().float()
     mod.weight.data.copy_(w)
     y = mod(x)
     assert torch.allclose(y, y_ref, atol=1e-4, rtol=1e-4)
 
-def test_backward_close():
+
+def test_backward_close(rmsnorm_cuda):
+    """Test backward pass matches reference implementation."""
     torch.manual_seed(0)
-    B,T,C = 2,4,128
-    x = torch.randn(B,T,C, device='cuda', dtype=torch.float32, requires_grad=True)
+    B, T, C = 2, 4, 128
+    x = torch.randn(B, T, C, device='cuda', dtype=torch.float32, requires_grad=True)
     w = torch.randn(C, device='cuda', dtype=torch.float32, requires_grad=True)
 
     # Our module
-    mod = RMSNormCUDA(C).cuda().float()
+    mod = rmsnorm_cuda(C).cuda().float()
     mod.weight.data.copy_(w.detach())
     y = mod(x)
     loss = y.sum()
