@@ -3,7 +3,6 @@
 from typing import Optional, TYPE_CHECKING
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from tinylm.components.registry import ATTENTION_REGISTRY
 from tinylm.components.positional.base import PositionalContext
@@ -11,6 +10,7 @@ from tinylm.quant import QuantConfig, make_linear
 
 if TYPE_CHECKING:
     from tinylm.inference.cache_manager import CacheManager
+    from tinylm.components.attention.ops import AttentionOp
 
 
 @ATTENTION_REGISTRY.register("mha")
@@ -21,6 +21,10 @@ class MHA(nn.Module):
     - RoPE: applies rotation to Q and K
     - Learned: no modification (added to input before attention)
     - ALiBi: adds attention bias
+
+    The attention computation is delegated to an AttentionOp instance,
+    allowing different implementations (standard, flash, sparse) to be
+    swapped without modifying this class.
 
     Used by: All architectures (LLaMA, GPT-2, Falcon, Mistral with different configs)
     """
@@ -33,6 +37,7 @@ class MHA(nn.Module):
         dropout: float = 0.0,
         bias: bool = False,
         quant_config: Optional[QuantConfig] = None,
+        attention_op: Optional[str] = "standard",
     ):
         super().__init__()
         assert dim % n_heads == 0, f"dim {dim} must be divisible by n_heads {n_heads}"
@@ -41,6 +46,7 @@ class MHA(nn.Module):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads or n_heads  # For MQA/GQA support later
         self.head_dim = dim // n_heads
+        self._dropout_p = dropout
 
         # Projections
         self.qkv = make_linear(
@@ -52,6 +58,14 @@ class MHA(nn.Module):
             quant_config=quant_config, layer_type="attention"
         )
         self.dropout = nn.Dropout(dropout)
+
+        # Attention operation (composable computation backend)
+        from tinylm.components.attention.ops import build_attention_op
+        self.attention_op = build_attention_op(
+            attention_op,
+            dropout=dropout,
+            scale=None,  # Use default 1/sqrt(head_dim)
+        )
 
         # Store reference to positional embedding (set by parent block)
         self.pos_emb = None
@@ -117,17 +131,15 @@ class MHA(nn.Module):
         if pos_emb_module is not None and pos_emb_module.modifies_attention:
             attn_bias = pos_emb_module.get_attention_bias(pos_ctx)
 
-        # Compute attention
+        # Compute attention via composable AttentionOp
         # Only use causal mask for multi-token sequences (prefill)
         # Single-token generation (T=1) doesn't need masking
-        if attn_bias is not None:
-            attn = F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_bias,
-                is_causal=False
-            )
-        else:
-            attn = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))
+        attn = self.attention_op(
+            q, k, v,
+            attn_mask=attn_bias,
+            is_causal=(T > 1),
+            training=self.training,
+        )
 
         # Reshape and project
         y = attn.transpose(1, 2).contiguous().view(B, T, C)

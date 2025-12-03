@@ -58,5 +58,6 @@ class ComponentRegistry:
 NORM_REGISTRY = ComponentRegistry("normalization")
 POS_EMB_REGISTRY = ComponentRegistry("positional_embedding")
 ATTENTION_REGISTRY = ComponentRegistry("attention")
+ATTENTION_OP_REGISTRY = ComponentRegistry("attention_op")
 MLP_REGISTRY = ComponentRegistry("mlp")
 ACTIVATION_REGISTRY = ComponentRegistry("activation")
