@@ -16,14 +16,15 @@ Usage:
     rmsnorm_kernel = get_kernel("rmsnorm")
 """
 
-from typing import Type, Optional, List, Literal
+from typing import List, Literal, Optional, Type
+
 import torch
 
 from tinylm.components.registry import BaseRegistry
-from tinylm.kernels.base import KernelBackend, RMSNormKernel
-from tinylm.kernels.backends.pytorch import PyTorchBackend
 from tinylm.kernels.backends.cuda import CUDABackend
+from tinylm.kernels.backends.pytorch import PyTorchBackend
 from tinylm.kernels.backends.triton import TritonBackend
+from tinylm.kernels.base import KernelBackend, RMSNormKernel
 
 __all__ = [
     "KernelBackend",

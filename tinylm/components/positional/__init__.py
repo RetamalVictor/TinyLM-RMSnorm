@@ -1,9 +1,14 @@
 """Positional embedding components for TinyLM."""
 
-from tinylm.components.registry import POS_EMB_REGISTRY
+from typing import TYPE_CHECKING
+
 from tinylm.components.positional.base import PositionalContext, PositionalEmbedding
-from tinylm.components.positional.rope import RoPE
 from tinylm.components.positional.learned import LearnedPositionalEmbedding
+from tinylm.components.positional.rope import RoPE
+from tinylm.components.registry import POS_EMB_REGISTRY
+
+if TYPE_CHECKING:
+    import torch.nn as nn
 
 
 def build_pos_emb(

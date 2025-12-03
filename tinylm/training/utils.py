@@ -1,9 +1,8 @@
 """Training utilities."""
 
-import os
+import logging
 import signal
 import sys
-import logging
 
 import torch
 import torch.nn as nn

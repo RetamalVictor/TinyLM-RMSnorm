@@ -1,9 +1,8 @@
 """Architecture presets for TinyLM."""
 
-from typing import Dict, Optional
+from typing import Dict
 
 from tinylm.architectures.config import ArchitectureConfig
-
 
 # Architecture presets
 ARCHITECTURES: Dict[str, ArchitectureConfig] = {

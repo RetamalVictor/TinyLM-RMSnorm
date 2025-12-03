@@ -1,17 +1,18 @@
 """Transformer model for TinyLM."""
 
 from typing import Optional
+
 import torch
 import torch.nn as nn
 
 from tinylm.architectures import ArchitectureConfig, get_architecture
 from tinylm.components import (
+    PositionalContext,
     build_norm,
     build_pos_emb,
-    PositionalContext,
 )
-from tinylm.model.blocks import build_block
 from tinylm.inference.cache_manager import CacheManager, StandardCache
+from tinylm.model.blocks import build_block
 from tinylm.quant import QuantConfig, make_linear
 
 

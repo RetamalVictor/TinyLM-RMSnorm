@@ -1,11 +1,12 @@
 """Learned positional embeddings (GPT-style)."""
 
 from typing import Dict, Optional
+
 import torch
 import torch.nn as nn
 
-from tinylm.components.registry import POS_EMB_REGISTRY
 from tinylm.components.positional.base import PositionalContext
+from tinylm.components.registry import POS_EMB_REGISTRY
 
 
 @POS_EMB_REGISTRY.register("learned")

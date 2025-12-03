@@ -32,8 +32,8 @@ from tinylm.quant.factory import (
     make_linear,
 )
 
-# Import methods to register them
-from tinylm.quant.methods import (  # noqa: F401
+# Import methods to register them (they're re-exported in __all__)
+from tinylm.quant.methods import (
     NoneQuantMethod,
     TernaryQuantMethod,
 )

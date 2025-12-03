@@ -1,6 +1,7 @@
 """PyTorch native backend - always available, works on CPU and GPU."""
 
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
 import torch
 
 from tinylm.kernels.base import KernelBackend, RMSNormKernel

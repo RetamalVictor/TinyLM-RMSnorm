@@ -1,5 +1,6 @@
 """Training utilities for TinyLM."""
 
+from tinylm.training.checkpoint import CheckpointManager
 from tinylm.training.data import (
     CharDataset,
     StreamingDataset,
@@ -7,16 +8,15 @@ from tinylm.training.data import (
     create_dataloaders,
     get_file_size_mb,
 )
-from tinylm.training.checkpoint import CheckpointManager
 from tinylm.training.metrics import MetricsLogger
-from tinylm.training.scheduler import get_lr_scheduler, EarlyStopping
+from tinylm.training.scheduler import EarlyStopping, get_lr_scheduler
 from tinylm.training.trainer import Trainer, TrainerConfig, TrainerState
 from tinylm.training.utils import (
-    setup_signal_handlers,
+    count_parameters,
+    evaluate,
     is_shutdown_requested,
     reset_shutdown_flag,
-    evaluate,
-    count_parameters,
+    setup_signal_handlers,
 )
 
 __all__ = [

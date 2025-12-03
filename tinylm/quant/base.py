@@ -2,7 +2,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Any, Dict, Type
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 import torch.nn as nn
 from torch import Tensor

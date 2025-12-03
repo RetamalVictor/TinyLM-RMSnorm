@@ -5,12 +5,11 @@ This refactored version uses the benchmark base class to eliminate duplication.
 """
 
 import argparse
-import time
+from typing import Dict, List, Tuple
+
 import torch
 import torch.nn as nn
-from typing import List, Tuple, Dict
-
-from benchmark_base import BenchmarkConfig, BenchmarkBase
+from benchmark_base import BenchmarkBase, BenchmarkConfig
 from model import RMSNormCUDA
 
 

@@ -18,10 +18,8 @@ Example:
 """
 
 from typing import Optional
-import torch.nn as nn
 
-from tinylm.components.registry import ATTENTION_REGISTRY, ATTENTION_OP_REGISTRY
-from tinylm.quant import QuantConfig
+import torch.nn as nn
 
 # Import attention module to register with registry
 from tinylm.components.attention.mha import MHA, make_attention
@@ -29,12 +27,14 @@ from tinylm.components.attention.mha import MHA, make_attention
 # Import attention ops
 from tinylm.components.attention.ops import (
     AttentionOp,
-    StandardAttentionOp,
     FlashAttentionOp,
     MemoryEfficientAttentionOp,
-    build_attention_op,
+    StandardAttentionOp,
     available_attention_ops,
+    build_attention_op,
 )
+from tinylm.components.registry import ATTENTION_OP_REGISTRY, ATTENTION_REGISTRY
+from tinylm.quant import QuantConfig
 
 
 def build_attention(

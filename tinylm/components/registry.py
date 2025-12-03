@@ -1,6 +1,7 @@
 """Component registry system for TinyLM building blocks."""
 
-from typing import TypeVar, Type, Dict, Callable, List, Generic
+from typing import Callable, Dict, Generic, List, Type, TypeVar
+
 import torch.nn as nn
 
 T = TypeVar('T')

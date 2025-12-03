@@ -1,16 +1,16 @@
 """Multi-Head Attention implementation."""
 
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
 import torch
 import torch.nn as nn
 
-from tinylm.components.registry import ATTENTION_REGISTRY
 from tinylm.components.positional.base import PositionalContext
+from tinylm.components.registry import ATTENTION_REGISTRY
 from tinylm.quant import QuantConfig, make_linear
 
 if TYPE_CHECKING:
     from tinylm.inference.cache_manager import CacheManager
-    from tinylm.components.attention.ops import AttentionOp
 
 
 @ATTENTION_REGISTRY.register("mha")

@@ -4,7 +4,7 @@ from typing import Optional
 
 import torch.nn as nn
 
-from tinylm.quant.base import QuantMethod, QuantParams, QUANT_REGISTRY
+from tinylm.quant.base import QUANT_REGISTRY, QuantMethod, QuantParams
 
 
 @QUANT_REGISTRY.register("none")

@@ -6,10 +6,9 @@ and provides proper statistical measurements.
 """
 
 import argparse
-import time
-import torch
 from typing import List, Tuple
 
+import torch
 from benchmark_base import BenchmarkConfig, KVCacheBenchmark
 
 
@@ -151,7 +150,7 @@ class KVComparisonRunner(KVCacheBenchmark):
         # Create model
         self.create_model(dropout=0.0)
 
-        print(f"\nKV-Cache Comparison Benchmark")
+        print("\nKV-Cache Comparison Benchmark")
         print(f"  Prompt: '{self.args.prompt}'")
         print(f"  Steps: {self.args.steps}")
         print(f"  Data type: {self.config.dtype}")

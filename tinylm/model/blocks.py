@@ -1,14 +1,15 @@
 """Transformer blocks for TinyLM."""
 
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
 import torch
 import torch.nn as nn
 
 from tinylm.components import (
-    build_norm,
+    PositionalContext,
     build_attention,
     build_mlp,
-    PositionalContext,
+    build_norm,
 )
 from tinylm.quant import QuantConfig
 

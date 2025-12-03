@@ -17,33 +17,34 @@ Usage:
 """
 
 import os
+
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import logging
 from pathlib import Path
 
-import torch
-from torch.optim import AdamW
-from tokenizers import Tokenizer
-from tqdm import tqdm
 import hydra
+import torch
 from omegaconf import DictConfig, OmegaConf
+from tokenizers import Tokenizer
+from torch.optim import AdamW
+from tqdm import tqdm
 
 from tinylm import TinyLM
-from tinylm.architectures import get_architecture, ArchitectureConfig
+from tinylm.architectures import ArchitectureConfig, get_architecture
+from tinylm.kernels import available_backends, set_backend
 from tinylm.quant import QuantConfig
-from tinylm.kernels import set_backend, available_backends
 from tinylm.training import (
+    CheckpointManager,
+    EarlyStopping,
+    MetricsLogger,
     Trainer,
     TrainerConfig,
     build_tokenizer,
-    create_dataloaders,
-    CheckpointManager,
-    MetricsLogger,
-    get_lr_scheduler,
-    EarlyStopping,
-    setup_signal_handlers,
     count_parameters,
+    create_dataloaders,
+    get_lr_scheduler,
+    setup_signal_handlers,
 )
 
 log = logging.getLogger(__name__)

@@ -1,6 +1,7 @@
 """Prepare TinyStories dataset with streaming (memory efficient)."""
 
 import os
+
 from datasets import load_dataset
 
 os.makedirs('data', exist_ok=True)

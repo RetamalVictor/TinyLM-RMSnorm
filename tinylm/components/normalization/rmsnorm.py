@@ -1,11 +1,12 @@
 """RMSNorm with pluggable kernel backends (PyTorch, CUDA, Triton)."""
 
-from typing import Tuple, Optional
+from typing import Tuple
+
 import torch
 import torch.nn as nn
 
 from tinylm.components.registry import NORM_REGISTRY
-from tinylm.kernels import get_backend, get_kernel
+from tinylm.kernels import get_backend
 
 
 class RMSNormKernelFn(torch.autograd.Function):
@@ -57,7 +58,6 @@ class RMSNormKernelFn(torch.autograd.Function):
             # Forward: y = x * rsqrt(mean(x^2) + eps) * w
             # Let rms = rsqrt(mean(x^2) + eps), y = x * rms * w
             rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
-            y = x * rms * weight
 
             # Gradient of weight: sum over batch and seq dimensions
             # dw = sum(dy * x * rms, dim=[0, 1, ...])

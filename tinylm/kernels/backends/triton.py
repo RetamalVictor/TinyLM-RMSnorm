@@ -4,7 +4,8 @@ This is a stub implementation for Issue 3 (Triton RMSNorm).
 Triton provides easier kernel development with competitive performance.
 """
 
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
 import torch
 
 from tinylm.kernels.base import KernelBackend, RMSNormKernel
@@ -17,12 +18,9 @@ def _check_triton_available() -> bool:
     """Check if Triton is installed and functional."""
     global _triton_available
     if _triton_available is None:
-        try:
-            import triton
-            import triton.language as tl
-            _triton_available = torch.cuda.is_available()
-        except ImportError:
-            _triton_available = False
+        import importlib.util
+        triton_spec = importlib.util.find_spec("triton")
+        _triton_available = triton_spec is not None and torch.cuda.is_available()
     return _triton_available
 
 

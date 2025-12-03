@@ -3,16 +3,15 @@
 import pytest
 import torch
 
+from tinylm.components.normalization import RMSNorm
 from tinylm.kernels import (
     BACKEND_REGISTRY,
-    set_backend,
+    available_backends,
     get_backend,
     get_kernel,
-    available_backends,
-    KernelBackend,
+    set_backend,
 )
-from tinylm.kernels.backends import PyTorchBackend, CUDABackend, TritonBackend
-from tinylm.components.normalization import RMSNorm
+from tinylm.kernels.backends import CUDABackend, PyTorchBackend, TritonBackend
 
 
 class TestKernelBackendRegistry:

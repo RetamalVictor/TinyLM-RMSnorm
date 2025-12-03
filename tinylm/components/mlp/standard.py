@@ -1,11 +1,12 @@
 """Standard MLP (feed-forward) implementation."""
 
 from typing import Optional
+
 import torch
 import torch.nn as nn
 
-from tinylm.components.registry import MLP_REGISTRY
 from tinylm.components.activations import get_activation_fn
+from tinylm.components.registry import MLP_REGISTRY
 from tinylm.quant import QuantConfig, make_linear
 
 

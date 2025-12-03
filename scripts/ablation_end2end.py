@@ -1,6 +1,13 @@
-import time, argparse, os, torch, torch.nn as nn, random
+import argparse
+import os
+import random
+import time
+
+import torch
+import torch.nn as nn
+from model import RMSNormCUDA, build_sincos, prealloc_kvcache
 from tokenizers import Tokenizer
-from model import TinyLM, build_sincos, prealloc_kvcache, RMSNormCUDA
+
 
 class RMSNormRef(nn.Module):
     def __init__(self, dim, eps=1e-6):

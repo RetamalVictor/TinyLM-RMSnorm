@@ -1,17 +1,17 @@
 """Data loading utilities for training."""
 
 import os
-from pathlib import Path
-
-import torch
-from torch.utils.data import Dataset, IterableDataset, DataLoader
 from typing import Literal
 
+import torch
 from tokenizers import Tokenizer
+from tokenizers.decoders import BPEDecoder
+from tokenizers.decoders import ByteLevel as ByteLevelDecoder
 from tokenizers.models import BPE
+from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer
+from tokenizers.pre_tokenizers import Whitespace as WhitespacePreTokenizer
 from tokenizers.trainers import BpeTrainer
-from tokenizers.pre_tokenizers import ByteLevel as ByteLevelPreTokenizer, Whitespace as WhitespacePreTokenizer
-from tokenizers.decoders import ByteLevel as ByteLevelDecoder, BPEDecoder
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 
 
 class CharDataset(Dataset):

@@ -11,15 +11,15 @@ from tinylm.architectures import (
     register_architecture,
 )
 from tinylm.components import (
-    build_norm,
-    build_pos_emb,
+    PositionalContext,
+    build_activation,
     build_attention,
     build_mlp,
-    build_activation,
-    PositionalContext,
+    build_norm,
+    build_pos_emb,
 )
-from tinylm.model.blocks import build_block, PreNormBlock, PostNormBlock
 from tinylm.inference.cache_manager import StandardCache
+from tinylm.model.blocks import PostNormBlock, PreNormBlock, build_block
 
 
 # Test fixtures

@@ -1,10 +1,10 @@
 """Basic tests for TinyLM model components."""
 
-import pytest
-import torch
-import torch.nn as nn
 import sys
 from pathlib import Path
+
+import pytest
+import torch
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -14,6 +14,7 @@ def test_imports():
     """Test that core modules can be imported."""
     try:
         from model import TinyLM, build_sincos, prealloc_kvcache
+
         from train import CharDataset
         assert True
     except ImportError as e:

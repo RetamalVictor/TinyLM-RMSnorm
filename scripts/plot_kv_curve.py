@@ -1,4 +1,10 @@
-import argparse, csv, matplotlib.pyplot as plt, os, os.path as osp
+import argparse
+import csv
+import os
+import os.path as osp
+
+import matplotlib.pyplot as plt
+
 ap = argparse.ArgumentParser()
 ap.add_argument('--csv', default='out/kv_curve.csv')
 ap.add_argument('--out', default='out/fig_kv_curve_panels.png')
@@ -29,7 +35,7 @@ for lab in labels:
 
     # Only lengths present in BOTH series
     Ls = sorted(set(d_kv).intersection(d_nokv))
-    if not Ls: 
+    if not Ls:
         continue
     kv   = [d_kv[L]   for L in Ls]
     nokv = [d_nokv[L] for L in Ls]

@@ -21,11 +21,7 @@ def _check_sdp_kernel_available() -> bool:
     """Check if SDPA kernel selection is available (requires CUDA)."""
     if not torch.cuda.is_available():
         return False
-    try:
-        from torch.backends.cuda import sdp_kernel  # noqa: F401
-        return True
-    except ImportError:
-        return False
+    return hasattr(torch.backends.cuda, "sdp_kernel")
 
 
 def _check_flash_available() -> bool:

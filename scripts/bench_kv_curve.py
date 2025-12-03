@@ -5,11 +5,9 @@ This refactored version uses the benchmark base class to eliminate duplication.
 """
 
 import argparse
-import time
-import torch
-import random
 from typing import List, Tuple
 
+import torch
 from benchmark_base import BenchmarkConfig, KVCacheBenchmark
 
 
@@ -185,7 +183,7 @@ class KVCurveRunner(KVCacheBenchmark):
 
             except RuntimeError as e:
                 if 'out of memory' in str(e).lower():
-                    print(f"  OOM - skipping")
+                    print("  OOM - skipping")
                     torch.cuda.empty_cache()
                 else:
                     raise

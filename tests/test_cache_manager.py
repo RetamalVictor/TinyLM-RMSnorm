@@ -4,7 +4,6 @@ import pytest
 import torch
 
 from tinylm.inference.cache_manager import (
-    CacheManager,
     StandardCache,
 )
 

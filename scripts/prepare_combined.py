@@ -1,8 +1,8 @@
 """Prepare combined dataset from tinyshakespeare + tinystories."""
 
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 # Scripts and data directories
 scripts_dir = Path(__file__).parent

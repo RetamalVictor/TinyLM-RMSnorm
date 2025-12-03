@@ -1,8 +1,13 @@
 """Normalization components for TinyLM."""
 
-from tinylm.components.registry import NORM_REGISTRY
-from tinylm.components.normalization.rmsnorm import RMSNorm
+from typing import TYPE_CHECKING
+
 from tinylm.components.normalization.layernorm import LayerNorm
+from tinylm.components.normalization.rmsnorm import RMSNorm
+from tinylm.components.registry import NORM_REGISTRY
+
+if TYPE_CHECKING:
+    import torch.nn as nn
 
 
 def build_norm(norm_type: str, dim: int, **kwargs) -> "nn.Module":

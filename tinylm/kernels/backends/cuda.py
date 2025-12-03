@@ -1,6 +1,7 @@
 """CUDA kernel backend - uses custom CUDA kernels when available."""
 
-from typing import Tuple, Optional
+from typing import Optional, Tuple
+
 import torch
 
 from tinylm.kernels.base import KernelBackend, RMSNormKernel

@@ -1,4 +1,10 @@
-import argparse, csv, matplotlib.pyplot as plt, os, os.path as osp
+import argparse
+import csv
+import os
+import os.path as osp
+
+import matplotlib.pyplot as plt
+
 ap = argparse.ArgumentParser()
 ap.add_argument('--csv', default='out/rmsnorm_bench.csv')
 ap.add_argument('--out', default='out/fig_rmsnorm.png')

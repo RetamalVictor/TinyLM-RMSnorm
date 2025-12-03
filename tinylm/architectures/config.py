@@ -1,7 +1,7 @@
 """Architecture configuration for TinyLM."""
 
-from dataclasses import dataclass, field, asdict
-from typing import Literal, Optional, Dict, Any
+from dataclasses import asdict, dataclass
+from typing import Any, Dict, Literal, Optional
 
 
 @dataclass

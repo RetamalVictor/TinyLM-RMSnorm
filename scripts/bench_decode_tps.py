@@ -5,10 +5,9 @@ This refactored version uses the benchmark base class to eliminate duplication.
 """
 
 import argparse
-import time
-import torch
 from typing import List, Tuple
 
+import torch
 from benchmark_base import BenchmarkConfig, KVCacheBenchmark
 
 
@@ -88,7 +87,7 @@ class DecodeThroughputRunner(KVCacheBenchmark):
         mean_tps = self.args.steps / stats['mean']
         std_tps = self.args.steps * stats['std'] / (stats['mean'] ** 2)
 
-        print(f"\nDecode Throughput Benchmark:")
+        print("\nDecode Throughput Benchmark:")
         print(f"  Steps: {self.args.steps}")
         print(f"  Tokens/sec: {mean_tps:.2f} ± {std_tps:.2f}")
         print(f"  Latency: {stats['mean']*1000:.2f} ± {stats['std']*1000:.2f} ms")

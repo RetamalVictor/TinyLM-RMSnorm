@@ -1,14 +1,15 @@
 """MLP components for TinyLM."""
 
 from typing import Optional
+
 import torch.nn as nn
 
-from tinylm.components.registry import MLP_REGISTRY
-from tinylm.quant import QuantConfig
+from tinylm.components.mlp.gated import GatedMLP
 
 # Import to register with registry
 from tinylm.components.mlp.standard import StandardMLP
-from tinylm.components.mlp.gated import GatedMLP
+from tinylm.components.registry import MLP_REGISTRY
+from tinylm.quant import QuantConfig
 
 
 def build_mlp(

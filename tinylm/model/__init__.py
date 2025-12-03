@@ -1,7 +1,7 @@
 """Model components for TinyLM."""
 
+from tinylm.model.blocks import PostNormBlock, PreNormBlock, build_block
 from tinylm.model.transformer import TinyLM
-from tinylm.model.blocks import PreNormBlock, PostNormBlock, build_block
 
 __all__ = [
     "TinyLM",

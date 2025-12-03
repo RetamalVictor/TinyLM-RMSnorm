@@ -1,6 +1,9 @@
-import argparse, os, torch
-from tokenizers import Tokenizer
+import argparse
+import os
+
+import torch
 from model import TinyLM, build_sincos, prealloc_kvcache
+from tokenizers import Tokenizer
 
 ap = argparse.ArgumentParser()
 ap.add_argument('--ckpt', required=True)
@@ -31,5 +34,6 @@ for L in args.seq:
 
 os.makedirs('out', exist_ok=True)
 import csv
+
 with open(args.out, 'w', newline='') as f: csv.writer(f).writerows(lines)
 print('Wrote', args.out)

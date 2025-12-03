@@ -1,7 +1,8 @@
 """Text generation utilities for TinyLM."""
 
 import random
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
 import torch
 from tokenizers import Tokenizer
 

@@ -1,6 +1,7 @@
 """Metrics logging for training."""
 
 import logging
+
 from torch.utils.tensorboard import SummaryWriter
 
 log = logging.getLogger(__name__)

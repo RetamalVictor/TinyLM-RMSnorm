@@ -1,13 +1,12 @@
 """Ternary quantization using BitTorch."""
 
-from typing import Optional, Tuple, Dict, Any
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from torch import Tensor
 
-from tinylm.quant.base import QuantMethod, QuantParams, QUANT_REGISTRY
-
+from tinylm.quant.base import QUANT_REGISTRY, QuantMethod, QuantParams
 
 # Check if BitTorch is available
 _BITTORCH_AVAILABLE = False

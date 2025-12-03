@@ -2,15 +2,13 @@
 
 import pytest
 import torch
-import torch.nn as nn
 
 from tinylm.components.attention.ops import (
-    AttentionOp,
-    StandardAttentionOp,
     FlashAttentionOp,
     MemoryEfficientAttentionOp,
-    build_attention_op,
+    StandardAttentionOp,
     available_attention_ops,
+    build_attention_op,
 )
 from tinylm.components.registry import ATTENTION_OP_REGISTRY
 

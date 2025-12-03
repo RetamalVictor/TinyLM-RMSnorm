@@ -1,7 +1,8 @@
 """Base classes and protocols for positional embeddings."""
 
 from dataclasses import dataclass
-from typing import Optional, Dict, Protocol, runtime_checkable
+from typing import Dict, Optional, Protocol, runtime_checkable
+
 import torch
 
 

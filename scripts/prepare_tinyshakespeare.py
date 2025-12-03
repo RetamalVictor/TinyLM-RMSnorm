@@ -1,4 +1,7 @@
-import requests, os
+import os
+
+import requests
+
 os.makedirs('data', exist_ok=True)
 url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
 text = requests.get(url).text

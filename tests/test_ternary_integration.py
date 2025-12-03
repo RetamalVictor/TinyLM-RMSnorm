@@ -4,12 +4,11 @@ import pytest
 import torch
 import torch.nn as nn
 
-from tinylm import QuantConfig, make_linear, TinyLM
+from tinylm import QuantConfig, TinyLM, make_linear
 from tinylm.components.attention import MHA
-from tinylm.model.blocks import PreNormBlock as Block
 from tinylm.components.positional import RoPE
 from tinylm.components.positional.base import PositionalContext
-
+from tinylm.model.blocks import PreNormBlock as Block
 
 # Skip all tests if bittorch is not available
 pytestmark = pytest.mark.skipif(

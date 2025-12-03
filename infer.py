@@ -7,8 +7,8 @@ import torch
 from tokenizers import Tokenizer
 
 from tinylm import TinyLM, generate
+from tinylm.kernels import available_backends, set_backend
 from tinylm.quant import QuantConfig
-from tinylm.kernels import set_backend, available_backends
 
 
 def main():
