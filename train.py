@@ -23,7 +23,6 @@ import logging
 from pathlib import Path
 
 import torch
-import torch.nn as nn
 from torch.optim import AdamW
 from tokenizers import Tokenizer
 from tqdm import tqdm
@@ -35,6 +34,8 @@ from tinylm.architectures import get_architecture, ArchitectureConfig
 from tinylm.quant import QuantConfig
 from tinylm.kernels import set_backend, available_backends
 from tinylm.training import (
+    Trainer,
+    TrainerConfig,
     build_tokenizer,
     create_dataloaders,
     CheckpointManager,
@@ -42,8 +43,6 @@ from tinylm.training import (
     get_lr_scheduler,
     EarlyStopping,
     setup_signal_handlers,
-    is_shutdown_requested,
-    evaluate,
     count_parameters,
 )
 
@@ -51,6 +50,105 @@ log = logging.getLogger(__name__)
 
 # Setup graceful shutdown
 setup_signal_handlers()
+
+
+def create_trainer_hooks(
+    cfg: DictConfig,
+    metrics_logger: MetricsLogger,
+    ckpt_manager: CheckpointManager,
+    early_stopping: EarlyStopping | None,
+    tokenizer: Tokenizer,
+    arch_config: ArchitectureConfig,
+    quant_config: QuantConfig | None,
+    pbar: tqdm,
+):
+    """Create hook functions for the Trainer.
+
+    Returns dict of hook callbacks that integrate with TinyLM's
+    logging, checkpointing, and early stopping infrastructure.
+    """
+
+    def on_step_end(trainer: Trainer, metrics: dict):
+        """Called after each optimizer step."""
+        optimizer_step = metrics.get("optimizer_step", 0)
+
+        # Log metrics
+        if optimizer_step % cfg.logging.log_every == 0:
+            train_loss = metrics.get("train_loss", 0)
+            train_ppl = torch.exp(torch.tensor(train_loss)).item()
+            current_lr = metrics.get("lr", 0)
+
+            metrics_logger.log_scalar("train/loss", train_loss, optimizer_step)
+            metrics_logger.log_scalar("train/perplexity", train_ppl, optimizer_step)
+            metrics_logger.log_scalar("train/lr", current_lr, optimizer_step)
+
+            grad_norm = metrics.get("grad_norm")
+            if grad_norm is not None:
+                metrics_logger.log_scalar("train/grad_norm", grad_norm, optimizer_step)
+
+            pbar.set_description(
+                f"Loss: {train_loss:.3f} | PPL: {train_ppl:.1f} | LR: {current_lr:.2e}"
+            )
+
+        pbar.update(cfg.training.grad_accum_steps)
+
+    def on_eval(trainer: Trainer, metrics: dict):
+        """Called after evaluation."""
+        optimizer_step = metrics.get("optimizer_step", 0)
+        val_loss = metrics["val_loss"]
+        val_ppl = metrics["val_perplexity"]
+        is_best = metrics.get("is_best", False)
+
+        metrics_logger.log_scalar("val/loss", val_loss, optimizer_step)
+        metrics_logger.log_scalar("val/perplexity", val_ppl, optimizer_step)
+        metrics_logger.flush()
+
+        if is_best:
+            log.info(f"[Step {optimizer_step}] New best val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
+
+            # Save best checkpoint
+            if cfg.checkpoint.save_best:
+                state = _build_checkpoint_state(trainer, cfg, tokenizer, arch_config, quant_config)
+                ckpt_manager.save(state, trainer.state.step, is_best=True)
+
+        # Early stopping check
+        if early_stopping is not None and early_stopping(val_loss):
+            log.info(
+                f"Early stopping triggered at step {optimizer_step} "
+                f"(patience={cfg.training.early_stopping_patience})"
+            )
+            trainer.stop()
+
+        # Periodic checkpoint
+        if optimizer_step % cfg.checkpoint.save_every == 0 and optimizer_step > 0:
+            state = _build_checkpoint_state(trainer, cfg, tokenizer, arch_config, quant_config)
+            ckpt_manager.save(state, trainer.state.step, is_best=False)
+
+    def on_train_end(trainer: Trainer, metrics: dict):
+        """Called when training ends."""
+        pbar.close()
+
+    return {
+        "on_step_end": on_step_end,
+        "on_eval": on_eval,
+        "on_train_end": on_train_end,
+    }
+
+
+def _build_checkpoint_state(
+    trainer: Trainer,
+    cfg: DictConfig,
+    tokenizer: Tokenizer,
+    arch_config: ArchitectureConfig,
+    quant_config: QuantConfig | None,
+) -> dict:
+    """Build checkpoint state dict."""
+    state = trainer.state_dict()
+    state["config"] = OmegaConf.to_container(cfg, resolve=True)
+    state["tokenizer"] = tokenizer.to_str()
+    state["quant_config"] = quant_config.to_dict() if quant_config else None
+    state["arch_config"] = arch_config.to_dict()
+    return state
 
 
 @hydra.main(version_base=None, config_path="conf", config_name="config")
@@ -65,11 +163,11 @@ def main(cfg: DictConfig):
         torch.cuda.manual_seed_all(cfg.experiment.seed)
 
     # Device setup
-    device = cfg.device if torch.cuda.is_available() else 'cpu'
+    device = cfg.device if torch.cuda.is_available() else "cpu"
     log.info(f"Using device: {device}")
 
     # Setup kernel backend
-    kernel_backend = cfg.get('kernels', {}).get('backend', 'auto')
+    kernel_backend = cfg.get("kernels", {}).get("backend", "auto")
     try:
         set_backend(kernel_backend)
         log.info(f"Kernel backend: {kernel_backend} (available: {available_backends()})")
@@ -97,13 +195,13 @@ def main(cfg: DictConfig):
     tokenizer_path = hydra_dir / "tokenizer.json"
 
     # Check if fine-tuning - load checkpoint once for tokenizer and arch_config
-    finetune_cfg = getattr(cfg, 'finetune', None)
+    finetune_cfg = getattr(cfg, "finetune", None)
     finetune_ckpt = None
     if finetune_cfg and finetune_cfg.checkpoint_path:
         log.info(f"Loading checkpoint for fine-tuning: {finetune_cfg.checkpoint_path}")
-        finetune_ckpt = torch.load(finetune_cfg.checkpoint_path, map_location='cpu')
+        finetune_ckpt = torch.load(finetune_cfg.checkpoint_path, map_location="cpu")
         # Load tokenizer from checkpoint (must match!)
-        tokenizer = Tokenizer.from_str(finetune_ckpt['tokenizer'])
+        tokenizer = Tokenizer.from_str(finetune_ckpt["tokenizer"])
         tokenizer.save(str(tokenizer_path))
     elif not tokenizer_path.exists():
         log.info(f"Building tokenizer (type={cfg.tokenizer.type}, vocab_size={cfg.tokenizer.vocab_size})...")
@@ -111,7 +209,7 @@ def main(cfg: DictConfig):
             [cfg.data.train_path, cfg.data.val_path],
             str(tokenizer_path),
             vocab_size=cfg.tokenizer.vocab_size,
-            tokenizer_type=cfg.tokenizer.type
+            tokenizer_type=cfg.tokenizer.type,
         )
         tokenizer = Tokenizer.from_file(str(tokenizer_path))
     else:
@@ -143,15 +241,15 @@ def main(cfg: DictConfig):
         log.info(f"Ternary quantization enabled: {quant_config}")
 
     # Get architecture config
-    arch_name = cfg.model.get('architecture', 'llama')
+    arch_name = cfg.model.get("architecture", "llama")
     if finetune_ckpt is not None:
-        if 'arch_config' in finetune_ckpt:
-            arch_config = ArchitectureConfig.from_dict(finetune_ckpt['arch_config'])
+        if "arch_config" in finetune_ckpt:
+            arch_config = ArchitectureConfig.from_dict(finetune_ckpt["arch_config"])
             arch_name = arch_config.name
         else:
             # Legacy checkpoint without arch_config - assume llama
-            arch_config = get_architecture('llama')
-            arch_name = 'llama'
+            arch_config = get_architecture("llama")
+            arch_name = "llama"
             log.warning("Checkpoint missing arch_config, assuming llama architecture")
     else:
         arch_config = get_architecture(arch_name)
@@ -171,12 +269,12 @@ def main(cfg: DictConfig):
 
     # Fine-tuning: load weights and freeze layers
     if finetune_ckpt is not None:
-        log.info(f"Loading model weights for fine-tuning...")
+        log.info("Loading model weights for fine-tuning...")
 
         # Load model weights
-        state_dict = finetune_ckpt['model']
+        state_dict = finetune_ckpt["model"]
         # Handle compiled model prefix
-        state_dict = {k.replace('_orig_mod.', ''): v for k, v in state_dict.items()}
+        state_dict = {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
         model.load_state_dict(state_dict)
         log.info("Loaded model weights from checkpoint")
 
@@ -204,7 +302,7 @@ def main(cfg: DictConfig):
 
         log.info(f"Frozen parameters: {frozen_params:,}")
 
-    if cfg.compile and hasattr(torch, 'compile'):
+    if cfg.compile and hasattr(torch, "compile"):
         log.info("Compiling model with torch.compile...")
         model = torch.compile(model)
 
@@ -219,7 +317,7 @@ def main(cfg: DictConfig):
         trainable_params,
         lr=cfg.training.lr,
         weight_decay=cfg.training.weight_decay,
-        betas=tuple(cfg.training.betas)
+        betas=tuple(cfg.training.betas),
     )
 
     # Learning rate scheduler
@@ -237,238 +335,102 @@ def main(cfg: DictConfig):
     if cfg.training.early_stopping_patience > 0:
         early_stopping = EarlyStopping(
             patience=cfg.training.early_stopping_patience,
-            min_delta=cfg.training.early_stopping_min_delta
+            min_delta=cfg.training.early_stopping_min_delta,
         )
         log.info(f"Early stopping enabled: patience={cfg.training.early_stopping_patience}")
 
     # Mixed precision scaler
-    scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.mixed_precision) if device == 'cuda' else None
+    scaler = torch.cuda.amp.GradScaler(enabled=cfg.training.mixed_precision) if device == "cuda" else None
+
+    # Create Trainer config
+    trainer_config = TrainerConfig(
+        total_steps=cfg.training.steps,
+        grad_accum_steps=cfg.training.grad_accum_steps,
+        grad_clip=cfg.training.grad_clip,
+        mixed_precision=cfg.training.mixed_precision,
+        log_every=cfg.logging.log_every,
+        eval_every=cfg.logging.eval_every,
+        max_eval_batches=cfg.logging.get("max_eval_batches", None),
+        save_every=cfg.checkpoint.save_every,
+        save_best=cfg.checkpoint.save_best,
+        device=device,
+    )
+
+    # Create Trainer
+    trainer = Trainer(
+        model=model,
+        optimizer=optimizer,
+        config=trainer_config,
+        scheduler=scheduler,
+        scaler=scaler,
+    )
 
     # Resume from checkpoint if specified
     start_step = 0
-    best_val_loss = float('inf')
-
     if cfg.resume.enabled:
         ckpt_path = cfg.resume.checkpoint_path or ckpt_manager.get_latest()
         if ckpt_path and os.path.exists(ckpt_path):
             checkpoint = ckpt_manager.load(ckpt_path)
-            model.load_state_dict(checkpoint['model'])
-            optimizer.load_state_dict(checkpoint['optimizer'])
-            if scheduler and 'scheduler' in checkpoint:
-                scheduler.load_state_dict(checkpoint['scheduler'])
-            if scaler and 'scaler' in checkpoint:
-                scaler.load_state_dict(checkpoint['scaler'])
-            start_step = checkpoint.get('step', 0) + 1
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            log.info(f"Resumed from step {start_step}, best_val_loss={best_val_loss:.4f}")
+            trainer.load_state_dict(checkpoint)
+            start_step = trainer.state.step + 1
+            log.info(f"Resumed from step {start_step}, best_val_loss={trainer.state.best_val_loss:.4f}")
         else:
             log.warning("Resume enabled but no checkpoint found. Starting from scratch.")
 
-    # Training loop
-    log.info(f"Starting training from step {start_step} to {cfg.training.steps}")
-
-    step = start_step
-    train_iter = iter(train_dl)
+    # Create progress bar
     pbar = tqdm(total=cfg.training.steps - start_step, initial=0)
-    accum_loss = 0.0
-    grad_norm = None
+
+    # Create and register hooks
+    hooks = create_trainer_hooks(
+        cfg=cfg,
+        metrics_logger=metrics_logger,
+        ckpt_manager=ckpt_manager,
+        early_stopping=early_stopping,
+        tokenizer=tokenizer,
+        arch_config=arch_config,
+        quant_config=quant_config,
+        pbar=pbar,
+    )
+    for event, callback in hooks.items():
+        trainer.add_hook(event, callback)
 
     # Initial validation (baseline)
-    max_eval_batches = cfg.logging.get('max_eval_batches', None)
+    max_eval_batches = cfg.logging.get("max_eval_batches", None)
     if start_step == 0:
         log.info(f"Running initial validation (max_batches={max_eval_batches})...")
-        val_loss, val_ppl = evaluate(model, val_dl, device, use_amp=cfg.training.mixed_precision, max_batches=max_eval_batches)
-        metrics_logger.log_scalar('val/loss', val_loss, 0)
-        metrics_logger.log_scalar('val/perplexity', val_ppl, 0)
+        eval_metrics = trainer.evaluate(val_dl, max_batches=max_eval_batches)
+        val_loss, val_ppl = eval_metrics["val_loss"], eval_metrics["val_perplexity"]
+        metrics_logger.log_scalar("val/loss", val_loss, 0)
+        metrics_logger.log_scalar("val/perplexity", val_ppl, 0)
         metrics_logger.flush()
-        best_val_loss = val_loss
+        trainer.state.best_val_loss = val_loss
         log.info(f"[Step 0] Initial val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
 
-    while step < cfg.training.steps:
-        # Check for graceful shutdown
-        if is_shutdown_requested():
-            log.info(f"Graceful shutdown at step {step}")
-            state = {
-                'step': step,
-                'model': model.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'scheduler': scheduler.state_dict() if scheduler else None,
-                'scaler': scaler.state_dict() if scaler else None,
-                'best_val_loss': best_val_loss,
-                'config': OmegaConf.to_container(cfg, resolve=True),
-                'tokenizer': tokenizer.to_str(),
-                'quant_config': quant_config.to_dict() if quant_config else None,
-                'arch_config': arch_config.to_dict(),
-            }
-            ckpt_manager.save(state, step, is_best=False)
-            break
+    # Run training
+    log.info(f"Starting training from step {start_step} to {cfg.training.steps}")
+    final_metrics = trainer.train(train_dl, val_dl, start_step=start_step)
 
-        # Get batch
-        try:
-            x, y = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_dl)
-            x, y = next(train_iter)
-
-        x, y = x.to(device), y.to(device)
-
-        # Zero gradients at start of accumulation
-        if step % cfg.training.grad_accum_steps == 0:
-            optimizer.zero_grad(set_to_none=True)
-
-        # Forward pass
-        try:
-            if cfg.training.mixed_precision and scaler is not None:
-                with torch.cuda.amp.autocast():
-                    logits = model(x)
-                    loss = nn.functional.cross_entropy(
-                        logits.view(-1, logits.size(-1)), y.view(-1)
-                    )
-                    loss = loss / cfg.training.grad_accum_steps
-                scaler.scale(loss).backward()
-            else:
-                logits = model(x)
-                loss = nn.functional.cross_entropy(
-                    logits.view(-1, logits.size(-1)), y.view(-1)
-                )
-                loss = loss / cfg.training.grad_accum_steps
-                loss.backward()
-
-            accum_loss += loss.item() * cfg.training.grad_accum_steps
-
-        except RuntimeError as e:
-            if 'out of memory' in str(e).lower():
-                log.warning(f"OOM at step {step}. Clearing cache.")
-                optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
-                continue
-            raise
-
-        # Update weights after accumulation
-        if (step + 1) % cfg.training.grad_accum_steps == 0:
-            if cfg.training.mixed_precision and scaler is not None:
-                scaler.unscale_(optimizer)
-                if cfg.training.grad_clip > 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), cfg.training.grad_clip
-                    )
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                if cfg.training.grad_clip > 0:
-                    grad_norm = torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), cfg.training.grad_clip
-                    )
-                optimizer.step()
-
-            if scheduler:
-                scheduler.step()
-
-            train_loss = accum_loss / cfg.training.grad_accum_steps
-            accum_loss = 0.0
-
-            # Get current LR
-            current_lr = optimizer.param_groups[0]['lr']
-
-            # Compute optimizer step (actual update count)
-            optimizer_step = (step + 1) // cfg.training.grad_accum_steps
-
-            # Log training metrics
-            if optimizer_step % cfg.logging.log_every == 0:
-                train_ppl = torch.exp(torch.tensor(train_loss)).item()
-                metrics_logger.log_scalar('train/loss', train_loss, optimizer_step)
-                metrics_logger.log_scalar('train/perplexity', train_ppl, optimizer_step)
-                metrics_logger.log_scalar('train/lr', current_lr, optimizer_step)
-                if grad_norm is not None:
-                    metrics_logger.log_scalar('train/grad_norm', grad_norm.item(), optimizer_step)
-
-                pbar.set_description(
-                    f"Loss: {train_loss:.3f} | PPL: {train_ppl:.1f} | LR: {current_lr:.2e}"
-                )
-
-            # Validation
-            if optimizer_step % cfg.logging.eval_every == 0 and optimizer_step > 0:
-                val_loss, val_ppl = evaluate(
-                    model, val_dl, device,
-                    use_amp=cfg.training.mixed_precision,
-                    max_batches=max_eval_batches
-                )
-                metrics_logger.log_scalar('val/loss', val_loss, optimizer_step)
-                metrics_logger.log_scalar('val/perplexity', val_ppl, optimizer_step)
-                metrics_logger.flush()
-
-                is_best = val_loss < best_val_loss
-                if is_best:
-                    best_val_loss = val_loss
-                    log.info(f"[Step {optimizer_step}] New best val_loss: {val_loss:.4f} (PPL: {val_ppl:.1f})")
-
-                # Save checkpoint
-                if cfg.checkpoint.save_best and is_best:
-                    state = {
-                        'step': step,
-                        'model': model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'scheduler': scheduler.state_dict() if scheduler else None,
-                        'scaler': scaler.state_dict() if scaler else None,
-                        'best_val_loss': best_val_loss,
-                        'config': OmegaConf.to_container(cfg, resolve=True),
-                        'tokenizer': tokenizer.to_str(),
-                        'quant_config': quant_config.to_dict() if quant_config else None,
-                        'arch_config': arch_config.to_dict(),
-                    }
-                    ckpt_manager.save(state, step, is_best=True)
-
-                # Early stopping check
-                if early_stopping is not None and early_stopping(val_loss):
-                    log.info(f"Early stopping triggered at step {optimizer_step} (patience={cfg.training.early_stopping_patience})")
-                    break
-
-            # Periodic checkpoint
-            if optimizer_step % cfg.checkpoint.save_every == 0 and optimizer_step > 0:
-                state = {
-                    'step': step,
-                    'model': model.state_dict(),
-                    'optimizer': optimizer.state_dict(),
-                    'scheduler': scheduler.state_dict() if scheduler else None,
-                    'scaler': scaler.state_dict() if scaler else None,
-                    'best_val_loss': best_val_loss,
-                    'config': OmegaConf.to_container(cfg, resolve=True),
-                    'tokenizer': tokenizer.to_str(),
-                    'quant_config': quant_config.to_dict() if quant_config else None,
-                    'arch_config': arch_config.to_dict(),
-                }
-                ckpt_manager.save(state, step, is_best=False)
-
-        step += 1
-        pbar.update(1)
-
-    pbar.close()
-
-    # Final evaluation and checkpoint (use more batches for accurate final score)
-    final_eval_batches = max_eval_batches * 5 if max_eval_batches else 500  # 5x normal or 500
+    # Final evaluation (use more batches for accurate final score)
+    final_eval_batches = max_eval_batches * 5 if max_eval_batches else 500
     log.info(f"Running final evaluation (max_batches={final_eval_batches})...")
-    final_val_loss, final_val_ppl = evaluate(
-        model, val_dl, device,
-        use_amp=cfg.training.mixed_precision,
-        max_batches=final_eval_batches,
-        log_progress=True
-    )
+    final_eval = trainer.evaluate(val_dl, max_batches=final_eval_batches)
+    final_val_loss, final_val_ppl = final_eval["val_loss"], final_eval["val_perplexity"]
     log.info(f"Final val_loss: {final_val_loss:.4f} (PPL: {final_val_ppl:.1f})")
-    log.info(f"Best val_loss: {best_val_loss:.4f}")
+    log.info(f"Best val_loss: {trainer.state.best_val_loss:.4f}")
 
     # Log hyperparameters
     hparams = {
-        'model/dim': cfg.model.dim,
-        'model/n_layers': cfg.model.n_layers,
-        'model/n_heads': cfg.model.n_heads,
-        'model/architecture': arch_name,
-        'training/lr': cfg.training.lr,
-        'training/batch_size': cfg.training.batch_size,
-        'training/steps': cfg.training.steps,
+        "model/dim": cfg.model.dim,
+        "model/n_layers": cfg.model.n_layers,
+        "model/n_heads": cfg.model.n_heads,
+        "model/architecture": arch_name,
+        "training/lr": cfg.training.lr,
+        "training/batch_size": cfg.training.batch_size,
+        "training/steps": cfg.training.steps,
     }
     metrics = {
-        'hparam/best_val_loss': best_val_loss,
-        'hparam/final_val_loss': final_val_loss,
+        "hparam/best_val_loss": trainer.state.best_val_loss,
+        "hparam/final_val_loss": final_val_loss,
     }
     metrics_logger.log_hparams(hparams, metrics)
     metrics_logger.close()
@@ -476,5 +438,5 @@ def main(cfg: DictConfig):
     log.info(f"Training complete! Output dir: {hydra_dir}")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

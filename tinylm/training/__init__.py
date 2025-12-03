@@ -10,6 +10,7 @@ from tinylm.training.data import (
 from tinylm.training.checkpoint import CheckpointManager
 from tinylm.training.metrics import MetricsLogger
 from tinylm.training.scheduler import get_lr_scheduler, EarlyStopping
+from tinylm.training.trainer import Trainer, TrainerConfig, TrainerState
 from tinylm.training.utils import (
     setup_signal_handlers,
     is_shutdown_requested,
@@ -19,6 +20,10 @@ from tinylm.training.utils import (
 )
 
 __all__ = [
+    # Trainer
+    'Trainer',
+    'TrainerConfig',
+    'TrainerState',
     # Data
     'CharDataset',
     'StreamingDataset',

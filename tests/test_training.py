@@ -232,10 +232,12 @@ class TestBuildTokenizer:
             f.write("foo bar baz\n" * 100)
 
         out_path = os.path.join(temp_dir, "tokenizer.json")
-        tok = build_tokenizer([corpus1, corpus2], out_path, vocab_size=100)
+        # Note: ByteLevel BPE has a minimum vocab of 256 (all byte values)
+        # plus special tokens, so we need vocab_size >= 257
+        tok = build_tokenizer([corpus1, corpus2], out_path, vocab_size=300)
 
         assert os.path.exists(out_path)
-        assert tok.get_vocab_size() <= 100
+        assert tok.get_vocab_size() <= 300
 
         # Should be able to encode
         encoded = tok.encode("hello world")
