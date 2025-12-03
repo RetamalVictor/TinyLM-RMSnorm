@@ -16,9 +16,10 @@ Usage:
     rmsnorm_kernel = get_kernel("rmsnorm")
 """
 
-from typing import Dict, Type, Optional, List, Literal
+from typing import Type, Optional, List, Literal
 import torch
 
+from tinylm.components.registry import BaseRegistry
 from tinylm.kernels.base import KernelBackend, RMSNormKernel
 from tinylm.kernels.backends.pytorch import PyTorchBackend
 from tinylm.kernels.backends.cuda import CUDABackend
@@ -44,10 +45,10 @@ BackendName = Literal["auto", "cuda", "triton", "pytorch"]
 DEFAULT_FALLBACK_CHAIN: List[str] = ["cuda", "triton", "pytorch"]
 
 
-class KernelBackendRegistry:
+class KernelBackendRegistry(BaseRegistry[KernelBackend]):
     """Registry for kernel backends with fallback support.
 
-    Features:
+    Extends BaseRegistry with kernel-specific functionality:
     - Global backend selection
     - Automatic fallback chain (CUDA -> Triton -> PyTorch)
     - Per-device backend resolution
@@ -55,15 +56,20 @@ class KernelBackendRegistry:
     """
 
     def __init__(self):
-        self._backends: Dict[str, Type[KernelBackend]] = {}
+        super().__init__("kernel_backend")
         self._current_backend: Optional[str] = None
         self._fallback_chain: List[str] = DEFAULT_FALLBACK_CHAIN.copy()
 
-    def register(self, name: str, backend_cls: Type[KernelBackend]) -> None:
-        """Register a backend implementation."""
-        if name in self._backends:
+    def register_backend(self, name: str, backend_cls: Type[KernelBackend]) -> None:
+        """Register a backend implementation (non-decorator form).
+
+        Args:
+            name: Backend name.
+            backend_cls: Backend class to register.
+        """
+        if name in self._registry:
             raise ValueError(f"Backend '{name}' already registered")
-        self._backends[name] = backend_cls
+        self._registry[name] = backend_cls
 
     def set_backend(self, name: str) -> None:
         """Set the active backend.
@@ -79,13 +85,13 @@ class KernelBackendRegistry:
             self._current_backend = None
             return
 
-        if name not in self._backends:
+        if name not in self._registry:
             raise ValueError(
                 f"Unknown backend: '{name}'. "
                 f"Available: {self.available()}"
             )
 
-        backend_cls = self._backends[name]
+        backend_cls = self._registry[name]
         if not backend_cls.is_available():
             raise ValueError(
                 f"Backend '{name}' is registered but not available. "
@@ -109,7 +115,7 @@ class KernelBackendRegistry:
         """
         # If a specific backend is set and supports the device, use it
         if self._current_backend is not None:
-            backend_cls = self._backends[self._current_backend]
+            backend_cls = self._registry[self._current_backend]
             if device is None or backend_cls.supports_device(device):
                 return backend_cls
 
@@ -119,9 +125,9 @@ class KernelBackendRegistry:
     def _resolve_backend(self, device: Optional[torch.device]) -> Type[KernelBackend]:
         """Resolve backend using fallback chain."""
         for backend_name in self._fallback_chain:
-            if backend_name not in self._backends:
+            if backend_name not in self._registry:
                 continue
-            backend_cls = self._backends[backend_name]
+            backend_cls = self._registry[backend_name]
             if backend_cls.is_available():
                 if device is None or backend_cls.supports_device(device):
                     return backend_cls
@@ -156,14 +162,10 @@ class KernelBackendRegistry:
             )
         return kernel
 
-    def available(self) -> List[str]:
-        """List all registered backend names."""
-        return list(self._backends.keys())
-
     def available_and_ready(self) -> List[str]:
         """List backends that are registered and available."""
         return [
-            name for name, cls in self._backends.items()
+            name for name, cls in self._registry.items()
             if cls.is_available()
         ]
 
@@ -180,21 +182,18 @@ class KernelBackendRegistry:
             chain: List of backend names in priority order.
         """
         for name in chain:
-            if name not in self._backends:
+            if name not in self._registry:
                 raise ValueError(f"Unknown backend in chain: '{name}'")
         self._fallback_chain = chain.copy()
-
-    def __contains__(self, name: str) -> bool:
-        return name in self._backends
 
 
 # Global registry instance
 BACKEND_REGISTRY = KernelBackendRegistry()
 
 # Register default backends
-BACKEND_REGISTRY.register("pytorch", PyTorchBackend)
-BACKEND_REGISTRY.register("cuda", CUDABackend)
-BACKEND_REGISTRY.register("triton", TritonBackend)
+BACKEND_REGISTRY.register_backend("pytorch", PyTorchBackend)
+BACKEND_REGISTRY.register_backend("cuda", CUDABackend)
+BACKEND_REGISTRY.register_backend("triton", TritonBackend)
 
 
 # Convenience functions for global backend management

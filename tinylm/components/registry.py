@@ -1,25 +1,46 @@
 """Component registry system for TinyLM building blocks."""
 
-from typing import TypeVar, Type, Dict, Callable, List
+from typing import TypeVar, Type, Dict, Callable, List, Generic
 import torch.nn as nn
 
-T = TypeVar('T', bound=nn.Module)
+T = TypeVar('T')
 
 
-class ComponentRegistry:
-    """Registry for component implementations with factory pattern."""
+class BaseRegistry(Generic[T]):
+    """Generic registry base class for pluggable implementations.
+
+    Provides core registration, lookup, and listing functionality.
+    Subclasses can add domain-specific methods (build, create_linear, etc.).
+
+    Type Parameters:
+        T: The base type that registered classes must extend.
+    """
 
     def __init__(self, name: str):
+        """Initialize registry.
+
+        Args:
+            name: Human-readable name for error messages (e.g., "normalization").
+        """
         self.name = name
-        self._registry: Dict[str, Type[nn.Module]] = {}
+        self._registry: Dict[str, Type[T]] = {}
 
     def register(self, name: str) -> Callable[[Type[T]], Type[T]]:
-        """Decorator to register a component implementation.
+        """Decorator to register an implementation.
 
         Usage:
-            @NORM_REGISTRY.register("rmsnorm")
-            class RMSNorm(nn.Module):
+            @REGISTRY.register("myimpl")
+            class MyImpl:
                 ...
+
+        Args:
+            name: Unique identifier for this implementation.
+
+        Returns:
+            Decorator function.
+
+        Raises:
+            ValueError: If name is already registered.
         """
         def decorator(cls: Type[T]) -> Type[T]:
             if name in self._registry:
@@ -28,17 +49,18 @@ class ComponentRegistry:
             return cls
         return decorator
 
-    def build(self, name: str, **kwargs) -> nn.Module:
-        """Build a component by name with given kwargs."""
-        if name not in self._registry:
-            raise ValueError(
-                f"Unknown {self.name}: '{name}'. "
-                f"Available: {self.available()}"
-            )
-        return self._registry[name](**kwargs)
+    def get(self, name: str) -> Type[T]:
+        """Get the class for a registered implementation.
 
-    def get(self, name: str) -> Type[nn.Module]:
-        """Get the class for a registered component."""
+        Args:
+            name: Registered name.
+
+        Returns:
+            The registered class.
+
+        Raises:
+            ValueError: If name is not registered.
+        """
         if name not in self._registry:
             raise ValueError(
                 f"Unknown {self.name}: '{name}'. "
@@ -47,11 +69,28 @@ class ComponentRegistry:
         return self._registry[name]
 
     def available(self) -> List[str]:
-        """List available implementations."""
+        """List registered implementation names."""
         return list(self._registry.keys())
 
     def __contains__(self, name: str) -> bool:
+        """Check if a name is registered."""
         return name in self._registry
+
+
+class ComponentRegistry(BaseRegistry[nn.Module]):
+    """Registry for nn.Module components with factory pattern."""
+
+    def build(self, name: str, **kwargs) -> nn.Module:
+        """Build a component by name with given kwargs.
+
+        Args:
+            name: Registered component name.
+            **kwargs: Arguments to pass to component constructor.
+
+        Returns:
+            Instantiated component.
+        """
+        return self.get(name)(**kwargs)
 
 
 # Global registries for each component type

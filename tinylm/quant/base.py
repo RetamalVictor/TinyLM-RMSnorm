@@ -2,11 +2,12 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Dict, Type, Callable, List, Optional, Tuple, Any
+from typing import List, Optional, Tuple, Any, Dict, Type
 
-import torch
 import torch.nn as nn
 from torch import Tensor
+
+from tinylm.components.registry import BaseRegistry
 
 
 @dataclass
@@ -127,15 +128,22 @@ class QuantMethod(ABC):
         return x, {}
 
 
-class QuantRegistry:
-    """Registry for quantization method implementations."""
+class QuantRegistry(BaseRegistry[QuantMethod]):
+    """Registry for quantization method implementations.
+
+    Extends BaseRegistry with quantization-specific functionality:
+    - Sets cls.name during registration
+    - create_linear() factory method
+    - available_and_ready() for checking availability
+    """
 
     def __init__(self, name: str = "quantization"):
-        self.name = name
-        self._registry: Dict[str, Type[QuantMethod]] = {}
+        super().__init__(name)
 
-    def register(self, name: str) -> Callable[[Type[QuantMethod]], Type[QuantMethod]]:
+    def register(self, name: str):
         """Decorator to register a quantization method.
+
+        Also sets cls.name to the registered name.
 
         Usage:
             @QUANT_REGISTRY.register("ternary")
@@ -149,25 +157,6 @@ class QuantRegistry:
             self._registry[name] = cls
             return cls
         return decorator
-
-    def get(self, name: str) -> Type[QuantMethod]:
-        """Get the quantization method class by name.
-
-        Args:
-            name: Name of the quantization method.
-
-        Returns:
-            The QuantMethod subclass.
-
-        Raises:
-            ValueError: If method is not registered.
-        """
-        if name not in self._registry:
-            raise ValueError(
-                f"Unknown {self.name} method: '{name}'. "
-                f"Available: {self.available()}"
-            )
-        return self._registry[name]
 
     def create_linear(
         self,
@@ -188,6 +177,9 @@ class QuantRegistry:
 
         Returns:
             Linear module.
+
+        Raises:
+            RuntimeError: If method is not available.
         """
         method_cls = self.get(method)
         if not method_cls.is_available():
@@ -197,19 +189,12 @@ class QuantRegistry:
             )
         return method_cls.create_linear(in_features, out_features, bias, params)
 
-    def available(self) -> List[str]:
-        """List registered quantization methods."""
-        return list(self._registry.keys())
-
     def available_and_ready(self) -> List[str]:
         """List quantization methods that are both registered and available."""
         return [
             name for name, cls in self._registry.items()
             if cls.is_available()
         ]
-
-    def __contains__(self, name: str) -> bool:
-        return name in self._registry
 
 
 # Global registry instance
