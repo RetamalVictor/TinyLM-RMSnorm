@@ -213,15 +213,15 @@ class TestTrainerDistributed:
         wrapped = trainer.wrap_model(wrapper=None)
         assert wrapped is trainer.model
 
-    def test_wrap_model_ddp_stub(self, trainer):
-        """Test wrap_model with ddp returns original model (stub)."""
-        wrapped = trainer.wrap_model(wrapper="ddp")
-        assert wrapped is trainer.model
+    def test_wrap_model_ddp_raises(self, trainer):
+        """Test wrap_model with ddp raises NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="DDP wrapper"):
+            trainer.wrap_model(wrapper="ddp")
 
-    def test_wrap_model_fsdp_stub(self, trainer):
-        """Test wrap_model with fsdp returns original model (stub)."""
-        wrapped = trainer.wrap_model(wrapper="fsdp")
-        assert wrapped is trainer.model
+    def test_wrap_model_fsdp_raises(self, trainer):
+        """Test wrap_model with fsdp raises NotImplementedError."""
+        with pytest.raises(NotImplementedError, match="FSDP wrapper"):
+            trainer.wrap_model(wrapper="fsdp")
 
     def test_wrap_model_invalid_raises(self, trainer):
         """Test wrap_model with invalid wrapper raises ValueError."""

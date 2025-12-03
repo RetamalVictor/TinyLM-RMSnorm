@@ -3,9 +3,8 @@
 from dataclasses import dataclass
 from typing import Literal
 
-
 # Type alias for supported quantization methods
-QuantMethodType = Literal["none", "ternary", "int8", "int4"]
+QuantMethodType = Literal["none", "ternary"]
 
 
 @dataclass
@@ -17,8 +16,6 @@ class QuantConfig:
         method: Quantization method to use. One of:
             - "none": No quantization (standard linear)
             - "ternary": Ternary quantization via BitTorch
-            - "int8": 8-bit integer quantization (stub)
-            - "int4": 4-bit integer quantization (stub)
         threshold_factor: Factor for ternary quantization threshold (default: 0.05).
         per_channel: If True, use per-channel scaling (default: True).
         backend: Backend to use for forward pass ("auto", "cuda", or "python").

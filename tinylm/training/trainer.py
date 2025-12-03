@@ -1,8 +1,8 @@
 """Trainer class for TinyLM with hooks for distributed training."""
 
 import logging
-from dataclasses import dataclass, field
-from typing import Optional, Callable, Dict, Any, List
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -145,18 +145,18 @@ class Trainer:
 
         Returns:
             The wrapped (or original) model
+
+        Raises:
+            NotImplementedError: If wrapper is "ddp" or "fsdp" (not yet implemented)
+            ValueError: If wrapper is unknown
         """
         if wrapper is None:
             return self.model
 
         if wrapper == "ddp":
-            # Will be implemented in Issue 10
-            log.warning("DDP wrapper not yet implemented (Issue 10)")
-            return self.model
+            raise NotImplementedError("DDP wrapper not yet implemented")
         elif wrapper == "fsdp":
-            # Will be implemented in Issue 11
-            log.warning("FSDP wrapper not yet implemented (Issue 11)")
-            return self.model
+            raise NotImplementedError("FSDP wrapper not yet implemented")
         else:
             raise ValueError(f"Unknown wrapper: {wrapper}")
 

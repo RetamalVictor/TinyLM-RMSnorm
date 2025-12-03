@@ -5,18 +5,16 @@ import torch
 import torch.nn as nn
 
 from tinylm.quant import (
+    QUANT_REGISTRY,
+    NoneQuantMethod,
     QuantConfig,
     QuantMethod,
     QuantParams,
     QuantRegistry,
-    QUANT_REGISTRY,
-    make_linear,
-    available_methods,
-    available_and_ready_methods,
-    NoneQuantMethod,
     TernaryQuantMethod,
-    Int8QuantMethod,
-    Int4QuantMethod,
+    available_and_ready_methods,
+    available_methods,
+    make_linear,
 )
 
 
@@ -28,8 +26,6 @@ class TestQuantRegistry:
         methods = available_methods()
         assert "none" in methods
         assert "ternary" in methods
-        assert "int8" in methods
-        assert "int4" in methods
 
     def test_none_method_always_available(self):
         """Test that 'none' method is always available."""
@@ -208,82 +204,6 @@ class TestTernaryQuantMethod:
         assert layer.__class__.__name__ == "TernaryLinear"
 
 
-class TestInt8QuantMethod:
-    """Tests for Int8QuantMethod (stub)."""
-
-    def test_not_available(self):
-        """Test that INT8 is not yet available."""
-        assert not Int8QuantMethod.is_available()
-
-    def test_create_linear_raises(self):
-        """Test that creating linear raises NotImplementedError."""
-        with pytest.raises(NotImplementedError):
-            Int8QuantMethod.create_linear(64, 128)
-
-    def test_quantize_weights(self):
-        """Test weight quantization logic."""
-        weight = torch.randn(32, 64)
-        params = QuantParams(bits=8, symmetric=True)
-
-        quantized, metadata = Int8QuantMethod.quantize_weights(weight, params)
-
-        # Should be int8
-        assert quantized.dtype == torch.int8
-        # Values should be in range
-        assert quantized.min() >= -127
-        assert quantized.max() <= 127
-
-    def test_dequantize_weights(self):
-        """Test weight dequantization."""
-        weight = torch.randn(32, 64)
-        params = QuantParams(bits=8, symmetric=True)
-
-        quantized, metadata = Int8QuantMethod.quantize_weights(weight, params)
-        dequantized = Int8QuantMethod.dequantize_weights(quantized, metadata)
-
-        # Should have same shape
-        assert dequantized.shape == weight.shape
-        # Dequantized should be close to original
-        assert torch.allclose(dequantized, weight, atol=0.1)
-
-
-class TestInt4QuantMethod:
-    """Tests for Int4QuantMethod (stub)."""
-
-    def test_not_available(self):
-        """Test that INT4 is not yet available."""
-        assert not Int4QuantMethod.is_available()
-
-    def test_create_linear_raises(self):
-        """Test that creating linear raises NotImplementedError."""
-        with pytest.raises(NotImplementedError):
-            Int4QuantMethod.create_linear(64, 128)
-
-    def test_quantize_weights(self):
-        """Test weight quantization logic."""
-        weight = torch.randn(32, 128)  # Multiple of group_size
-        params = QuantParams(bits=4, group_size=64)
-
-        quantized, metadata = Int4QuantMethod.quantize_weights(weight, params)
-
-        # Should be uint8 (4-bit stored in uint8)
-        assert quantized.dtype == torch.uint8
-        # Values should be in [0, 15] range
-        assert quantized.min() >= 0
-        assert quantized.max() <= 15
-
-    def test_dequantize_weights(self):
-        """Test weight dequantization."""
-        weight = torch.randn(32, 128)
-        params = QuantParams(bits=4, group_size=64)
-
-        quantized, metadata = Int4QuantMethod.quantize_weights(weight, params)
-        dequantized = Int4QuantMethod.dequantize_weights(quantized, metadata)
-
-        # Should have same shape
-        assert dequantized.shape == weight.shape
-
-
 class TestMakeLinear:
     """Tests for make_linear factory function."""
 
@@ -347,9 +267,13 @@ class TestMakeLinear:
         layer = make_linear(64, 128, quant_config=config, layer_type="head")
         assert isinstance(layer, nn.Linear)
 
+    @pytest.mark.skipif(
+        TernaryQuantMethod.is_available(),
+        reason="BitTorch is installed - cannot test unavailable method"
+    )
     def test_unavailable_method_raises(self):
         """Test that unavailable method raises RuntimeError."""
-        config = QuantConfig(enabled=True, method="int8")
+        config = QuantConfig(enabled=True, method="ternary")
         with pytest.raises(RuntimeError, match="not available"):
             make_linear(64, 128, quant_config=config)
 
