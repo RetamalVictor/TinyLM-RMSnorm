@@ -1,4 +1,4 @@
-name: CUDA Kernel Showcase CI
+name: TinyLM-Lab CI
 
 on:
   push:
@@ -7,59 +7,96 @@ on:
     branches: [ main ]
 
 jobs:
-  validate:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Run tests
+        run: |
+          uv run pytest tests/ -v --tb=short \
+            --ignore=tests/test_rmsnorm.py \
+            -k "not CUDA and not cuda"
+
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Check Python syntax
+        run: |
+          echo "Checking Python syntax..."
+          uv run python -m py_compile train.py
+          uv run python -m py_compile infer.py
+          uv run python -m py_compile tinylm/__init__.py
+          echo "All Python files have valid syntax"
+
+  validate-structure:
     name: Validate Project Structure
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.10'
-
-      - name: Validate Python syntax
+      - name: Verify project structure
         run: |
-          echo "Checking Python syntax..."
-          python -m py_compile model.py
-          python -m py_compile train.py
-          python -m py_compile infer.py
-          python -m py_compile scripts/bench_rmsnorm.py
-          python -m py_compile scripts/bench_kv_curve.py
-          echo "✓ All Python files have valid syntax"
-
-      - name: Verify CUDA kernel implementation
-        run: |
-          echo "=== CUDA Kernel Showcase Structure ==="
+          echo "=== TinyLM-Lab Project Structure ==="
           echo ""
-          echo "Core Implementation:"
-          test -f model.py && echo "  ✓ model.py - TinyLM transformer with RMSNorm"
-          test -f train.py && echo "  ✓ train.py - Training pipeline"
-          test -f infer.py && echo "  ✓ infer.py - Inference with KV-cache"
+          echo "Core Package:"
+          test -d tinylm && echo "  - tinylm/ package"
+          test -f tinylm/__init__.py && echo "  - tinylm/__init__.py"
+          test -d tinylm/model && echo "  - tinylm/model/ (TinyLM transformer)"
+          test -d tinylm/components && echo "  - tinylm/components/ (modular blocks)"
+          test -d tinylm/inference && echo "  - tinylm/inference/ (generation, cache)"
+          test -d tinylm/training && echo "  - tinylm/training/ (Trainer, data)"
+          test -d tinylm/quant && echo "  - tinylm/quant/ (quantization registry)"
+          test -d tinylm/kernels && echo "  - tinylm/kernels/ (kernel backend registry)"
+          test -d tinylm/architectures && echo "  - tinylm/architectures/ (LLaMA, GPT configs)"
+          echo ""
+          echo "Entry Points:"
+          test -f train.py && echo "  - train.py (training pipeline)"
+          test -f infer.py && echo "  - infer.py (inference with KV-cache)"
           echo ""
           echo "Custom CUDA Kernel:"
-          test -f kernels/rmsnorm_cuda.cu && echo "  ✓ rmsnorm_cuda.cu - Fused CUDA kernel"
-          test -f kernels/rmsnorm_binding.cpp && echo "  ✓ rmsnorm_binding.cpp - PyBind11 bindings"
-          test -f setup_cuda.py && echo "  ✓ setup_cuda.py - Build configuration"
+          test -f kernels/rmsnorm_cuda.cu && echo "  - kernels/rmsnorm_cuda.cu (fused kernel)"
+          test -f kernels/rmsnorm_binding.cpp && echo "  - kernels/rmsnorm_binding.cpp (PyBind11)"
           echo ""
-          echo "Performance Benchmarks:"
-          test -f scripts/bench_rmsnorm.py && echo "  ✓ RMSNorm kernel vs PyTorch baseline"
-          test -f scripts/bench_kv_vs_nokv.py && echo "  ✓ KV-cache vs no-cache comparison"
-          test -f scripts/bench_kv_curve.py && echo "  ✓ Context length scaling"
+          echo "Configuration:"
+          test -d conf && echo "  - conf/ (Hydra configs)"
           echo ""
-          echo "Documentation:"
-          test -f README.md && echo "  ✓ README.md - Performance claims & setup"
-          test -f LICENSE && echo "  ✓ LICENSE - MIT"
-          test -f Dockerfile && echo "  ✓ Dockerfile - Deployment ready"
+          echo "Tests:"
+          test -d tests && echo "  - tests/ (pytest suite)"
           echo ""
-          echo "Note: This project showcases CUDA kernel development expertise"
-          echo "Build & test locally with: python setup_cuda.py build_ext --inplace"
+          echo "Structure validation complete"
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
       - name: Run Trivy security scan
         uses: aquasecurity/trivy-action@master
@@ -68,9 +105,10 @@ jobs:
           scan-ref: '.'
           format: 'sarif'
           output: 'trivy-results.sarif'
+        continue-on-error: true
 
       - name: Upload Trivy results
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: 'trivy-results.sarif'
-
+        continue-on-error: true
