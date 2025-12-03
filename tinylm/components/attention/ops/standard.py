@@ -6,8 +6,8 @@ and input characteristics.
 """
 
 from typing import Optional
+
 import torch
-import torch.nn.functional as F
 
 from tinylm.components.attention.ops.base import AttentionOp
 from tinylm.components.registry import ATTENTION_OP_REGISTRY
@@ -47,17 +47,7 @@ class StandardAttentionOp(AttentionOp):
         Returns:
             Attention output [B, H, T, D]
         """
-        # Don't use is_causal if we have an explicit mask
-        # (they may conflict or double-apply causality)
-        use_causal = is_causal and attn_mask is None
-
-        return F.scaled_dot_product_attention(
-            q, k, v,
-            attn_mask=attn_mask,
-            dropout_p=self.dropout if training else 0.0,
-            is_causal=use_causal,
-            scale=self.scale,
-        )
+        return self._sdpa_fallback(q, k, v, attn_mask, is_causal, training)
 
     @classmethod
     def is_available(cls) -> bool:

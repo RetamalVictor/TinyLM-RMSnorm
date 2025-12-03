@@ -11,7 +11,9 @@ without modifying the MHA class.
 
 from abc import ABC, abstractmethod
 from typing import Optional
+
 import torch
+import torch.nn.functional as F
 
 
 class AttentionOp(ABC):
@@ -76,3 +78,34 @@ class AttentionOp(ABC):
     def name(self) -> str:
         """Return the registered name of this attention op."""
         return getattr(self, '_name', self.__class__.__name__)
+
+    def _sdpa_fallback(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        attn_mask: Optional[torch.Tensor],
+        is_causal: bool,
+        training: bool,
+    ) -> torch.Tensor:
+        """Standard SDPA call - shared fallback implementation.
+
+        Args:
+            q: Query tensor [B, H, T, D]
+            k: Key tensor [B, H, T_kv, D]
+            v: Value tensor [B, H, T_kv, D]
+            attn_mask: Optional attention bias
+            is_causal: Whether to apply causal masking
+            training: Whether in training mode
+
+        Returns:
+            Attention output [B, H, T, D]
+        """
+        use_causal = is_causal and attn_mask is None
+        return F.scaled_dot_product_attention(
+            q, k, v,
+            attn_mask=attn_mask,
+            dropout_p=self.dropout if training else 0.0,
+            is_causal=use_causal,
+            scale=self.scale,
+        )

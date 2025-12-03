@@ -9,6 +9,7 @@ or when auto-selection doesn't pick the optimal kernel.
 """
 
 from typing import Optional
+
 import torch
 import torch.nn.functional as F
 
@@ -16,34 +17,25 @@ from tinylm.components.attention.ops.base import AttentionOp
 from tinylm.components.registry import ATTENTION_OP_REGISTRY
 
 
-def _check_flash_available() -> bool:
-    """Check if Flash Attention is available."""
+def _check_sdp_kernel_available() -> bool:
+    """Check if SDPA kernel selection is available (requires CUDA)."""
     if not torch.cuda.is_available():
         return False
     try:
-        # Check if we can use the flash attention backend
-        # This requires PyTorch 2.0+ with CUDA support
-        from torch.backends.cuda import (
-            SDPBackend,
-            sdp_kernel,
-        )
+        from torch.backends.cuda import sdp_kernel  # noqa: F401
         return True
     except ImportError:
         return False
+
+
+def _check_flash_available() -> bool:
+    """Check if Flash Attention is available."""
+    return _check_sdp_kernel_available()
 
 
 def _check_memory_efficient_available() -> bool:
     """Check if memory-efficient attention is available."""
-    if not torch.cuda.is_available():
-        return False
-    try:
-        from torch.backends.cuda import (
-            SDPBackend,
-            sdp_kernel,
-        )
-        return True
-    except ImportError:
-        return False
+    return _check_sdp_kernel_available()
 
 
 @ATTENTION_OP_REGISTRY.register("flash")
@@ -83,12 +75,11 @@ class FlashAttentionOp(AttentionOp):
         Returns:
             Attention output [B, H, T, D]
         """
-        use_causal = is_causal and attn_mask is None
-
         if _check_flash_available() and attn_mask is None:
             # Use Flash Attention with explicit kernel selection
-            from torch.backends.cuda import SDPBackend, sdp_kernel
+            from torch.backends.cuda import sdp_kernel
 
+            use_causal = is_causal and attn_mask is None
             with sdp_kernel(
                 enable_flash=True,
                 enable_math=False,
@@ -102,13 +93,7 @@ class FlashAttentionOp(AttentionOp):
                 )
         else:
             # Fallback to standard SDPA (Flash doesn't support arbitrary masks)
-            return F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout if training else 0.0,
-                is_causal=use_causal,
-                scale=self.scale,
-            )
+            return self._sdpa_fallback(q, k, v, attn_mask, is_causal, training)
 
     @classmethod
     def is_available(cls) -> bool:
@@ -150,11 +135,10 @@ class MemoryEfficientAttentionOp(AttentionOp):
         Returns:
             Attention output [B, H, T, D]
         """
-        use_causal = is_causal and attn_mask is None
-
         if _check_memory_efficient_available():
-            from torch.backends.cuda import SDPBackend, sdp_kernel
+            from torch.backends.cuda import sdp_kernel
 
+            use_causal = is_causal and attn_mask is None
             with sdp_kernel(
                 enable_flash=False,
                 enable_math=False,
@@ -169,13 +153,7 @@ class MemoryEfficientAttentionOp(AttentionOp):
                 )
         else:
             # Fallback to standard SDPA
-            return F.scaled_dot_product_attention(
-                q, k, v,
-                attn_mask=attn_mask,
-                dropout_p=self.dropout if training else 0.0,
-                is_causal=use_causal,
-                scale=self.scale,
-            )
+            return self._sdpa_fallback(q, k, v, attn_mask, is_causal, training)
 
     @classmethod
     def is_available(cls) -> bool:
