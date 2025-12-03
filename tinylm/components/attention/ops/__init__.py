@@ -11,17 +11,18 @@ Example:
     >>> output = attn_op(q, k, v, is_causal=True)
 """
 
-from tinylm.components.attention.ops.base import AttentionOp
-from tinylm.components.attention.ops.standard import StandardAttentionOp
-from tinylm.components.attention.ops.flash import FlashAttentionOp, MemoryEfficientAttentionOp
+from typing import Optional
 
+from tinylm.components.attention.ops.base import AttentionOp
+from tinylm.components.attention.ops.flash import FlashAttentionOp, MemoryEfficientAttentionOp
+from tinylm.components.attention.ops.standard import StandardAttentionOp
 from tinylm.components.registry import ATTENTION_OP_REGISTRY
 
 
 def build_attention_op(
     op_type: str = "standard",
     dropout: float = 0.0,
-    scale: float = None,
+    scale: Optional[float] = None,
 ) -> AttentionOp:
     """Factory function to build attention operation.
 
