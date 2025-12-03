@@ -1,6 +1,6 @@
 """Transformer blocks for TinyLM."""
 
-from typing import Optional, Dict
+from typing import Optional, TYPE_CHECKING
 import torch
 import torch.nn as nn
 
@@ -11,6 +11,9 @@ from tinylm.components import (
     PositionalContext,
 )
 from tinylm.quant import QuantConfig
+
+if TYPE_CHECKING:
+    from tinylm.inference.cache_manager import CacheManager
 
 
 class PreNormBlock(nn.Module):
@@ -68,15 +71,17 @@ class PreNormBlock(nn.Module):
         self,
         x: torch.Tensor,
         pos_ctx: PositionalContext,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
+        cache: Optional["CacheManager"] = None,
+        layer_idx: int = 0,
         start_pos: int = 0,
     ) -> torch.Tensor:
         # Pre-norm: norm before attention and MLP
         x = x + self.attn(
             self.norm1(x),
             pos_ctx,
-            cache,
-            start_pos,
+            cache=cache,
+            layer_idx=layer_idx,
+            start_pos=start_pos,
             pos_emb=self.pos_emb,
         )
         x = x + self.mlp(self.norm2(x))
@@ -138,11 +143,18 @@ class PostNormBlock(nn.Module):
         self,
         x: torch.Tensor,
         pos_ctx: PositionalContext,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
+        cache: Optional["CacheManager"] = None,
+        layer_idx: int = 0,
         start_pos: int = 0,
     ) -> torch.Tensor:
         # Post-norm: norm after attention and MLP
-        x = self.norm1(x + self.attn(x, pos_ctx, cache, start_pos, pos_emb=self.pos_emb))
+        x = self.norm1(x + self.attn(
+            x, pos_ctx,
+            cache=cache,
+            layer_idx=layer_idx,
+            start_pos=start_pos,
+            pos_emb=self.pos_emb
+        ))
         x = self.norm2(x + self.mlp(x))
         return x
 

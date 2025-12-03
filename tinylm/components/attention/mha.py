@@ -1,6 +1,6 @@
 """Multi-Head Attention implementation."""
 
-from typing import Optional, Dict
+from typing import Optional, TYPE_CHECKING
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -8,6 +8,9 @@ import torch.nn.functional as F
 from tinylm.components.registry import ATTENTION_REGISTRY
 from tinylm.components.positional.base import PositionalContext
 from tinylm.quant import QuantConfig, make_linear
+
+if TYPE_CHECKING:
+    from tinylm.inference.cache_manager import CacheManager
 
 
 @ATTENTION_REGISTRY.register("mha")
@@ -61,7 +64,8 @@ class MHA(nn.Module):
         self,
         x: torch.Tensor,
         pos_ctx: PositionalContext,
-        cache: Optional[Dict[str, torch.Tensor]] = None,
+        cache: Optional["CacheManager"] = None,
+        layer_idx: int = 0,
         start_pos: int = 0,
         pos_emb: Optional[nn.Module] = None,
     ) -> torch.Tensor:
@@ -70,7 +74,8 @@ class MHA(nn.Module):
         Args:
             x: Input tensor [B, T, D]
             pos_ctx: Positional context with precomputed values
-            cache: Optional KV cache dict
+            cache: Optional CacheManager for KV caching
+            layer_idx: Layer index for cache operations
             start_pos: Starting position for cache
             pos_emb: Optional positional embedding module (overrides self.pos_emb)
 
@@ -91,7 +96,6 @@ class MHA(nn.Module):
         # Apply positional embeddings to Q and K (for RoPE)
         pos_emb_module = pos_emb or self.pos_emb
         if pos_emb_module is not None and pos_emb_module.modifies_qk:
-            # Update context with current position
             ctx = PositionalContext(
                 seq_len=T,
                 start_pos=start_pos,
@@ -103,12 +107,10 @@ class MHA(nn.Module):
             q = pos_emb_module.apply(q, ctx)
             k = pos_emb_module.apply(k, ctx)
 
-        # KV cache handling
+        # KV cache handling via CacheManager
         if cache is not None:
-            cache['k'][:, :, start_pos:start_pos+T] = k
-            cache['v'][:, :, start_pos:start_pos+T] = v
-            k = cache['k'][:, :, :start_pos+T]
-            v = cache['v'][:, :, :start_pos+T]
+            cache.update(layer_idx, k, v, start_pos)
+            k, v = cache.get(layer_idx, start_pos + T)
 
         # Get attention bias if applicable (for ALiBi)
         attn_bias = None
@@ -119,11 +121,10 @@ class MHA(nn.Module):
         # Only use causal mask for multi-token sequences (prefill)
         # Single-token generation (T=1) doesn't need masking
         if attn_bias is not None:
-            # With attention bias (ALiBi-style)
             attn = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=attn_bias,
-                is_causal=False  # Bias handles causality
+                is_causal=False
             )
         else:
             attn = F.scaled_dot_product_attention(q, k, v, is_causal=(T > 1))

@@ -1,6 +1,6 @@
 """Transformer model for TinyLM."""
 
-from typing import Optional, Dict, List
+from typing import Optional
 import torch
 import torch.nn as nn
 
@@ -11,7 +11,7 @@ from tinylm.components import (
     PositionalContext,
 )
 from tinylm.model.blocks import build_block
-from tinylm.inference.kv_cache import prealloc_kvcache
+from tinylm.inference.cache_manager import CacheManager, StandardCache
 from tinylm.quant import QuantConfig, make_linear
 
 
@@ -142,14 +142,14 @@ class TinyLM(nn.Module):
     def forward(
         self,
         idx: torch.Tensor,
-        cache: Optional[List[Dict[str, torch.Tensor]]] = None,
+        cache: Optional[CacheManager] = None,
         start_pos: int = 0,
     ) -> torch.Tensor:
         """Forward pass.
 
         Args:
             idx: Token indices [batch, seq_len]
-            cache: Optional list of KV caches (one per layer)
+            cache: Optional CacheManager for KV caching
             start_pos: Starting position for generation
 
         Returns:
@@ -171,8 +171,7 @@ class TinyLM(nn.Module):
 
         # Forward through blocks
         for i, block in enumerate(self.blocks):
-            layer_cache = cache[i] if cache is not None else None
-            x = block(x, pos_ctx, layer_cache, start_pos)
+            x = block(x, pos_ctx, cache=cache, layer_idx=i, start_pos=start_pos)
 
         # Final norm and head
         x = self.norm(x)
@@ -184,7 +183,7 @@ class TinyLM(nn.Module):
         max_seq_len: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
-    ) -> List[Dict[str, torch.Tensor]]:
+    ) -> CacheManager:
         """Create KV cache for generation.
 
         Args:
@@ -194,7 +193,7 @@ class TinyLM(nn.Module):
             dtype: Data type for cache tensors
 
         Returns:
-            List of cache dicts, one per layer
+            CacheManager instance (StandardCache)
         """
         if max_seq_len is None:
             max_seq_len = self.max_seq_len
@@ -203,15 +202,15 @@ class TinyLM(nn.Module):
         if dtype is None:
             dtype = next(self.parameters()).dtype
 
-        return prealloc_kvcache(
-            B=batch_size,
-            max_seq=max_seq_len,
+        cache = StandardCache(
+            n_layers=self.n_layers,
             n_heads=self.n_heads,
             head_dim=self.head_dim,
             device=device,
             dtype=dtype,
-            n_layers=self.n_layers,
         )
+        cache.allocate(batch_size, max_seq_len)
+        return cache
 
     def get_num_params(self) -> int:
         """Count total parameters."""

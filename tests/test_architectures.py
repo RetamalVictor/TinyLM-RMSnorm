@@ -19,6 +19,7 @@ from tinylm.components import (
     PositionalContext,
 )
 from tinylm.model.blocks import build_block, PreNormBlock, PostNormBlock
+from tinylm.inference.cache_manager import StandardCache
 
 
 # Test fixtures
@@ -185,13 +186,11 @@ class TestTransformerBlocks:
         x = torch.randn(2, 32, 128)
         ctx = PositionalContext(seq_len=32, start_pos=0)
 
-        # Create cache
-        cache = {
-            "k": torch.zeros(2, 4, 64, 32),
-            "v": torch.zeros(2, 4, 64, 32),
-        }
+        # Create cache using CacheManager
+        cache = StandardCache(n_layers=1, n_heads=4, head_dim=32)
+        cache.allocate(batch_size=2, max_seq_len=64)
 
-        out = block(x, ctx, cache=cache, start_pos=0)
+        out = block(x, ctx, cache=cache, layer_idx=0, start_pos=0)
         assert out.shape == x.shape
 
 
@@ -235,10 +234,11 @@ class TestTinyLMModel:
         model = TinyLM(**small_config, architecture="llama")
         cache = model.create_kv_cache(batch_size=2, max_seq_len=64)
 
-        assert len(cache) == small_config["n_layers"]
-        assert "k" in cache[0]
-        assert "v" in cache[0]
-        assert cache[0]["k"].shape == (2, 4, 64, 32)  # (B, n_heads, max_seq, head_dim)
+        assert isinstance(cache, StandardCache)
+        assert cache.n_layers == small_config["n_layers"]
+        assert cache.is_allocated
+        assert cache.batch_size == 2
+        assert cache.max_seq_len == 64
 
     def test_forward_with_kv_cache(self, small_config):
         model = TinyLM(**small_config, architecture="llama")
