@@ -5,6 +5,7 @@ defaults:
   - tokenizer: bytelevel
   - finetune: none
   - quant: none
+  - kernels: auto
   - _self_
 
 # Experiment tracking

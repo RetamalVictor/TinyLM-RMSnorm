@@ -1,0 +1,4 @@
+# Use pure PyTorch implementation
+# Always available, works on CPU and GPU
+# Slower than CUDA/Triton but guaranteed to work
+backend: pytorch

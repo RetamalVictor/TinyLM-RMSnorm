@@ -1,0 +1,3 @@
+# Auto-select best available kernel backend
+# Fallback chain: CUDA -> Triton -> PyTorch
+backend: auto

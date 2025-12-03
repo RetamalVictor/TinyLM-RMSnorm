@@ -33,6 +33,7 @@ from omegaconf import DictConfig, OmegaConf
 from tinylm import TinyLM
 from tinylm.architectures import get_architecture, ArchitectureConfig
 from tinylm.quant import QuantConfig
+from tinylm.kernels import set_backend, available_backends
 from tinylm.training import (
     build_tokenizer,
     create_dataloaders,
@@ -66,6 +67,15 @@ def main(cfg: DictConfig):
     # Device setup
     device = cfg.device if torch.cuda.is_available() else 'cpu'
     log.info(f"Using device: {device}")
+
+    # Setup kernel backend
+    kernel_backend = cfg.get('kernels', {}).get('backend', 'auto')
+    try:
+        set_backend(kernel_backend)
+        log.info(f"Kernel backend: {kernel_backend} (available: {available_backends()})")
+    except ValueError as e:
+        log.warning(f"Could not set kernel backend '{kernel_backend}': {e}. Using auto.")
+        set_backend("auto")
 
     # Get Hydra output directory
     hydra_dir = Path(hydra.core.hydra_config.HydraConfig.get().runtime.output_dir)

@@ -1,0 +1,4 @@
+# Use Triton JIT-compiled kernels
+# Requires: Triton installed, CUDA available
+# Status: Stub - not yet implemented (see Issue 3)
+backend: triton

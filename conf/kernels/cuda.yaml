@@ -1,0 +1,3 @@
+# Use CUDA custom kernels
+# Requires: CUDA available, kernels compiled (setup.py build_ext --inplace)
+backend: cuda

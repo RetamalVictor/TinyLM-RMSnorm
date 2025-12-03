@@ -8,6 +8,7 @@ from tokenizers import Tokenizer
 
 from tinylm import TinyLM, generate
 from tinylm.quant import QuantConfig
+from tinylm.kernels import set_backend, available_backends
 
 
 def main():
@@ -22,7 +23,14 @@ def main():
     ap.add_argument('--presence_penalty', type=float, default=0.0)
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--stream', action='store_true')
+    ap.add_argument('--kernel-backend', type=str, default='auto',
+                    choices=['auto', 'cuda', 'triton', 'pytorch'],
+                    help='Kernel backend to use (default: auto)')
     args = ap.parse_args()
+
+    # Setup kernel backend
+    set_backend(args.kernel_backend)
+    print(f"Kernel backend: {args.kernel_backend} (available: {available_backends()})")
 
     if not os.path.exists(args.ckpt):
         raise FileNotFoundError(f"Checkpoint not found: {args.ckpt}")
