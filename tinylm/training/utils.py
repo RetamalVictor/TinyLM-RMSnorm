@@ -2,6 +2,7 @@
 
 import os
 import signal
+import sys
 import logging
 
 import torch
@@ -11,16 +12,28 @@ log = logging.getLogger(__name__)
 
 # Graceful shutdown flag
 _shutdown_requested = False
+_force_quit_count = 0
 
 
 def _signal_handler(signum, frame):
-    global _shutdown_requested
+    global _shutdown_requested, _force_quit_count
+    _force_quit_count += 1
+
+    if _force_quit_count >= 2:
+        # Second Ctrl+C: force quit immediately
+        log.warning("Force quit requested. Exiting immediately...")
+        sys.exit(1)
+
     _shutdown_requested = True
-    log.warning("Shutdown requested, will save checkpoint after current step...")
+    log.warning("Shutdown requested, will save checkpoint after current step... (Ctrl+C again to force quit)")
 
 
 def setup_signal_handlers():
-    """Setup signal handlers for graceful shutdown."""
+    """Setup signal handlers for graceful shutdown.
+
+    First Ctrl+C: graceful shutdown (saves checkpoint)
+    Second Ctrl+C: force quit immediately
+    """
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
@@ -31,9 +44,10 @@ def is_shutdown_requested() -> bool:
 
 
 def reset_shutdown_flag():
-    """Reset the shutdown flag."""
-    global _shutdown_requested
+    """Reset the shutdown flag and force quit counter."""
+    global _shutdown_requested, _force_quit_count
     _shutdown_requested = False
+    _force_quit_count = 0
 
 
 @torch.no_grad()
