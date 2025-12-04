@@ -6,9 +6,9 @@ Checks if a model produces coherent, non-degenerate outputs.
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional
 
-import torch
+from wordfreq import word_frequency
 
 # Test prompts with expected patterns/keywords
 DEFAULT_TEST_PROMPTS = [
@@ -224,30 +224,54 @@ class FunctionalEvaluator:
         """Score text coherence (0-1).
 
         Checks:
-        - Has actual words (not just random characters)
-        - Vocabulary diversity
-        - Reasonable word lengths
+        - Real word ratio: % of words that exist in English dictionary
+        - Word frequency: average frequency of words (common words = more coherent)
+        - Sentence structure: punctuation and capitalization patterns
         """
         if not text or len(text) < 5:
             return 0.0
 
-        # Extract words
+        # Extract words (letters only, lowercase)
         words = re.findall(r"\b[a-zA-Z]+\b", text.lower())
         if len(words) < 3:
             return 0.1
 
-        # Vocabulary diversity (unique / total)
-        vocab_diversity = len(set(words)) / len(words)
+        # Filter to meaningful words (3+ chars) for real word check
+        # Short tokens like "a", "I" are valid but "tw", "cl" are noise
+        meaningful_words = [w for w in words if len(w) >= 3]
+        if not meaningful_words:
+            return 0.1
 
-        # Average word length (should be 3-8 for English)
-        avg_len = sum(len(w) for w in words) / len(words)
-        len_score = 1.0 if 3 <= avg_len <= 8 else max(0, 1 - abs(avg_len - 5.5) / 10)
+        # Real word ratio - most important metric
+        # Use minimum frequency threshold (1e-7) to filter rare abbreviations
+        min_freq = 1e-7
+        real_word_count = sum(
+            1 for w in meaningful_words if word_frequency(w, "en") >= min_freq
+        )
+        real_word_ratio = real_word_count / len(meaningful_words)
 
-        # Has punctuation (indicates sentence structure)
-        has_punct = 1.0 if re.search(r"[.!?,;:]", text) else 0.5
+        # Average word frequency (higher = more common/natural words)
+        frequencies = [word_frequency(w, "en") for w in meaningful_words]
+        avg_freq = sum(frequencies) / len(frequencies)
+        # Common words have freq ~1e-3, rare ~1e-6, gibberish = 0
+        # Scale so avg_freq of 1e-4 (typical English text) -> ~1.0
+        freq_score = min(1.0, avg_freq * 10000)
 
-        # Combine scores
-        return (vocab_diversity * 0.4 + len_score * 0.3 + has_punct * 0.3)
+        # Sentence structure indicators
+        has_punct = 1.0 if re.search(r"[.!?]", text) else 0.5
+        # Check for proper capitalization after sentence endings
+        has_caps = 1.0 if re.search(r"[.!?]\s+[A-Z]", text) else 0.7
+
+        # Combine scores - real word ratio is dominant
+        # Use squared ratio to penalize mixed gibberish more heavily
+        # (60% real words -> 0.36, 90% -> 0.81, 100% -> 1.0)
+        real_word_score = real_word_ratio ** 2
+        return (
+            real_word_score * 0.7  # 70% weight on real words (squared)
+            + freq_score * 0.1  # 10% on word frequency
+            + has_punct * 0.1  # 10% on punctuation
+            + has_caps * 0.1  # 10% on capitalization
+        )
 
     def _score_repetition(self, text: str) -> float:
         """Score for repetition (1 = no repetition, 0 = degenerate).
@@ -304,36 +328,49 @@ class FunctionalEvaluator:
         """Score contextual relevance of completion (0-1).
 
         Checks:
-        - Minimum length requirement
-        - Doesn't just repeat the prompt
-        - Forms coherent continuation
+        - Minimum length with real words
+        - Has new meaningful words (not just prompt repetition)
+        - Grammatical flow from prompt
         """
         if not completion:
             return 0.0
 
         score = 0.0
 
-        # Length check
-        words = completion.split()
-        if len(words) >= min_length:
+        # Extract meaningful words (3+ chars, real English)
+        min_freq = 1e-7
+        words = re.findall(r"\b[a-zA-Z]+\b", completion.lower())
+        real_words = [
+            w for w in words
+            if len(w) >= 3 and word_frequency(w, "en") >= min_freq
+        ]
+
+        # Length check based on real words
+        if len(real_words) >= min_length:
             score += 0.4
-        elif len(words) >= min_length // 2:
+        elif len(real_words) >= min_length // 2:
             score += 0.2
 
-        # Not just repeating prompt
-        prompt_words = set(prompt.lower().split())
-        completion_words = set(completion.lower().split())
-        if completion_words - prompt_words:  # Has new words
+        # Has new real words (not just repeating prompt)
+        prompt_words = set(re.findall(r"\b[a-zA-Z]+\b", prompt.lower()))
+        new_real_words = set(real_words) - prompt_words
+        if len(new_real_words) >= 3:
             score += 0.3
+        elif new_real_words:
+            score += 0.15
 
-        # Continuation flows from prompt (simple check: starts lowercase or with common continuations)
+        # Continuation flows grammatically
         first_char = completion[0] if completion else ""
         if first_char.islower() or first_char in ",.!?;:":
             score += 0.15
-        elif completion.split()[0].lower() in ["and", "the", "a", "but", "so", "then", "there", "in", "on", "was", "were", "had", "who", "that"]:
+        elif words and words[0] in [
+            "and", "the", "a", "but", "so", "then", "there",
+            "in", "on", "was", "were", "had", "who", "that",
+            "she", "he", "it", "they", "her", "his", "one",
+        ]:
             score += 0.15
 
-        # Has sentence structure
+        # Has complete sentences
         if re.search(r"[.!?]", completion):
             score += 0.15
 
