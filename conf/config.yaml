@@ -10,11 +10,19 @@ defaults:
 
 # Experiment tracking
 experiment:
-  name: ${model.name}_${data.name}
+  name: ${model.architecture}_${model.name}_${data.name}
   seed: 42
 
 # Output directories (Hydra manages these)
 output_dir: outputs
+
+# Hydra configuration
+hydra:
+  run:
+    dir: outputs/${model.architecture}_${model.name}_${data.name}/${now:%Y-%m-%d_%H-%M-%S}
+  sweep:
+    dir: outputs/sweeps/${now:%Y-%m-%d_%H-%M-%S}
+    subdir: ${model.architecture}_${model.name}
 checkpoint_dir: ${output_dir}/checkpoints
 
 # Checkpointing

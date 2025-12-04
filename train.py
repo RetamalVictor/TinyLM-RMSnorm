@@ -192,8 +192,12 @@ def main(cfg: DictConfig):
             f"Run 'python {cfg.data.prepare_script}' first."
         )
 
-    # Build or load tokenizer (stored in Hydra output dir)
-    tokenizer_path = hydra_dir / "tokenizer.json"
+    # Build or load tokenizer (cached by data+type+vocab_size)
+    tokenizer_cache_dir = Path("tokenizers")
+    tokenizer_cache_dir.mkdir(exist_ok=True)
+    tokenizer_cache_name = f"{cfg.data.name}_{cfg.tokenizer.type}_{cfg.tokenizer.vocab_size}.json"
+    tokenizer_cache_path = tokenizer_cache_dir / tokenizer_cache_name
+    tokenizer_path = hydra_dir / "tokenizer.json"  # Also save copy in run dir
 
     # Check if fine-tuning - load checkpoint once for tokenizer and arch_config
     finetune_cfg = getattr(cfg, "finetune", None)
@@ -204,17 +208,20 @@ def main(cfg: DictConfig):
         # Load tokenizer from checkpoint (must match!)
         tokenizer = Tokenizer.from_str(finetune_ckpt["tokenizer"])
         tokenizer.save(str(tokenizer_path))
-    elif not tokenizer_path.exists():
+    elif tokenizer_cache_path.exists():
+        log.info(f"Loading cached tokenizer from {tokenizer_cache_path}")
+        tokenizer = Tokenizer.from_file(str(tokenizer_cache_path))
+        tokenizer.save(str(tokenizer_path))  # Copy to run dir
+    else:
         log.info(f"Building tokenizer (type={cfg.tokenizer.type}, vocab_size={cfg.tokenizer.vocab_size})...")
         build_tokenizer(
             [cfg.data.train_path, cfg.data.val_path],
-            str(tokenizer_path),
+            str(tokenizer_cache_path),
             vocab_size=cfg.tokenizer.vocab_size,
             tokenizer_type=cfg.tokenizer.type,
         )
-        tokenizer = Tokenizer.from_file(str(tokenizer_path))
-    else:
-        tokenizer = Tokenizer.from_file(str(tokenizer_path))
+        tokenizer = Tokenizer.from_file(str(tokenizer_cache_path))
+        tokenizer.save(str(tokenizer_path))  # Copy to run dir
 
     # Create dataloaders
     train_dl, val_dl = create_dataloaders(

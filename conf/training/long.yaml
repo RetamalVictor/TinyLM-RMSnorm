@@ -19,3 +19,7 @@ grad_accum_steps: 2
 
 # Mixed precision
 mixed_precision: true
+
+# Early stopping (0 = disabled)
+early_stopping_patience: 0
+early_stopping_min_delta: 0.0
