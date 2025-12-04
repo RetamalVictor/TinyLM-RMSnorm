@@ -67,24 +67,28 @@ def load_checkpoint(
     else:
         model_cfg = cfg if cfg else {}
 
-    # Defaults
+    # Model config - prefer saved config over defaults
     dim = model_cfg.get("dim", 384)
     n_layers = model_cfg.get("n_layers", 6)
     n_heads = model_cfg.get("n_heads", 6)
-    vocab_size = tokenizer.get_vocab_size()
+    max_seq_len = model_cfg.get("max_seq_len", 4096)
+    architecture = model_cfg.get("architecture", "llama")
+    vocab_size = model_cfg.get("vocab_size") or tokenizer.get_vocab_size()
 
     # Load quantization config if present
     quant_config = None
     if "quant_config" in ckpt and ckpt["quant_config"] is not None:
         quant_config = QuantConfig.from_dict(ckpt["quant_config"])
 
-    # Create model
+    # Create model with saved architecture
     model = TinyLM(
         vocab_size=vocab_size,
         dim=dim,
         n_layers=n_layers,
         n_heads=n_heads,
+        max_seq_len=max_seq_len,
         dropout=0.0,
+        architecture=architecture,
         quant_config=quant_config,
     )
 
@@ -92,7 +96,7 @@ def load_checkpoint(
     state_dict = ckpt["model"]
     if any(k.startswith("_orig_mod.") for k in state_dict):
         state_dict = {k.replace("_orig_mod.", "", 1): v for k, v in state_dict.items()}
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict, strict=True)
 
     # Move to device
     model = model.to(device)
