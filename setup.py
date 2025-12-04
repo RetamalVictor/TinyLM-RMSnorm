@@ -17,7 +17,7 @@ if "TORCH_CUDA_ARCH_LIST" not in os.environ:
 # Check if we should build CUDA extension
 BUILD_CUDA = (
     os.environ.get("TINYLM_NO_CUDA", "0") != "1"
-    and Path("kernels").exists()
+    and Path("csrc").exists()
 )
 
 ext_modules = []
@@ -33,8 +33,8 @@ if BUILD_CUDA:
                 CUDAExtension(
                     name="tinylm._ext.rmsnorm_cuda",
                     sources=[
-                        "kernels/rmsnorm_binding.cpp",
-                        "kernels/rmsnorm_cuda.cu",
+                        "csrc/rmsnorm_binding.cpp",
+                        "csrc/rmsnorm_cuda.cu",
                     ],
                     extra_compile_args={
                         "cxx": ["-O3"],

@@ -94,6 +94,9 @@ outputs/
 out/
 tokenizer.json
 
+# Model registry data (infra code is tracked, data is not)
+models/
+
 # Data (keep prepare scripts, ignore downloaded data)
 data/*.txt
 
