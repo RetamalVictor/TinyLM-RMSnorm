@@ -26,8 +26,6 @@ from pathlib import Path
 import hydra
 import torch
 from omegaconf import DictConfig, OmegaConf
-from tokenizers import Tokenizer
-from torch.optim import AdamW
 from tqdm import tqdm
 
 from tinylm import TinyLM
@@ -46,6 +44,7 @@ from tinylm.training import (
     get_lr_scheduler,
     setup_signal_handlers,
 )
+from tokenizers import Tokenizer
 
 log = logging.getLogger(__name__)
 
@@ -319,15 +318,17 @@ def main(cfg: DictConfig):
     n_params = count_parameters(model)
     log.info(f"Model parameters: {n_params:,} ({n_params/1e6:.2f}M)")
 
-    # Optimizer (only trainable params)
+    # Optimizer
+    from tinylm.training.optimizers import build_optimizer
+
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     log.info(f"Trainable parameters: {sum(p.numel() for p in trainable_params):,}")
-    optimizer = AdamW(
-        trainable_params,
-        lr=cfg.training.lr,
-        weight_decay=cfg.training.weight_decay,
-        betas=tuple(cfg.training.betas),
+    optimizer = build_optimizer(
+        model=model,
+        optimizer_type=cfg.training.optimizer,
+        config=cfg.training,
     )
+    log.info(f"Using optimizer: {cfg.training.optimizer}")
 
     # Learning rate scheduler
     scheduler = get_lr_scheduler(

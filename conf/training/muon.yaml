@@ -1,0 +1,39 @@
+name: muon
+
+# Use Muon optimizer
+optimizer: muon
+
+# Muon hyperparameters (safe defaults for tiny models)
+muon_lr: 0.015
+muon_momentum: 0.9
+muon_nesterov: false
+muon_ns_steps: 5
+muon_orth_every: 4
+
+# Weight decay (applied only to 2D params)
+weight_decay: 0.0
+
+# Base LR for scheduler (uses muon_lr value)
+lr: 0.015
+betas: [0.9, 0.95]  # For AdamW fallback compatibility
+
+# Training settings (same as default)
+steps: 10000
+batch_size: 16
+seq_len: 256
+
+# Learning rate schedule
+lr_schedule: cosine
+warmup_steps: 100
+min_lr_ratio: 0.1
+
+# Gradient handling
+grad_clip: 1.0
+grad_accum_steps: 1
+
+# Mixed precision
+mixed_precision: true
+
+# Early stopping (0 = disabled)
+early_stopping_patience: 0
+early_stopping_min_delta: 0.0
