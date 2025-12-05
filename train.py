@@ -273,6 +273,7 @@ def main(cfg: DictConfig):
         dropout=cfg.model.dropout,
         arch_config=arch_config,
         quant_config=quant_config,
+        gradient_checkpointing=cfg.model.get("gradient_checkpointing", False),
     ).to(device)
 
     # Fine-tuning: load weights and freeze layers

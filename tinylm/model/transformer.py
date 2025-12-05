@@ -4,6 +4,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from torch.utils.checkpoint import checkpoint as torch_checkpoint
 
 from tinylm.architectures import ArchitectureConfig, get_architecture
 from tinylm.components import (
@@ -41,8 +42,10 @@ class TinyLM(nn.Module):
         architecture: str = "llama",
         arch_config: Optional[ArchitectureConfig] = None,
         quant_config: Optional[QuantConfig] = None,
+        gradient_checkpointing: bool = False,
     ):
         super().__init__()
+        self.gradient_checkpointing = gradient_checkpointing
 
         # Get architecture config
         if arch_config is not None:
@@ -172,7 +175,19 @@ class TinyLM(nn.Module):
 
         # Forward through blocks
         for i, block in enumerate(self.blocks):
-            x = block(x, pos_ctx, cache=cache, layer_idx=i, start_pos=start_pos)
+            if self.gradient_checkpointing and self.training:
+                # Checkpoint: recompute activations during backward to save memory
+                x = torch_checkpoint(
+                    block,
+                    x,
+                    pos_ctx,
+                    cache,
+                    i,
+                    start_pos,
+                    use_reentrant=False,
+                )
+            else:
+                x = block(x, pos_ctx, cache=cache, layer_idx=i, start_pos=start_pos)
 
         # Final norm and head
         x = self.norm(x)
