@@ -32,6 +32,7 @@ class PreNormBlock(nn.Module):
         n_kv_heads: Optional[int] = None,
         norm_type: str = "rmsnorm",
         attention_type: str = "mha",
+        attention_op: str = "standard",
         mlp_type: str = "gated",
         activation: str = "silu",
         mlp_ratio: float = 4.0,
@@ -53,6 +54,7 @@ class PreNormBlock(nn.Module):
             dropout=dropout,
             bias=bias,
             quant_config=quant_config,
+            attention_op=attention_op,
         )
         self.norm2 = build_norm(norm_type, dim, eps=norm_eps)
         self.mlp = build_mlp(
@@ -104,6 +106,7 @@ class PostNormBlock(nn.Module):
         n_kv_heads: Optional[int] = None,
         norm_type: str = "layernorm",
         attention_type: str = "mha",
+        attention_op: str = "standard",
         mlp_type: str = "standard",
         activation: str = "gelu",
         mlp_ratio: float = 4.0,
@@ -124,6 +127,7 @@ class PostNormBlock(nn.Module):
             dropout=dropout,
             bias=bias,
             quant_config=quant_config,
+            attention_op=attention_op,
         )
         self.norm1 = build_norm(norm_type, dim, eps=norm_eps, bias=bias)
         self.mlp = build_mlp(

@@ -87,6 +87,7 @@ class TinyLM(nn.Module):
                 n_kv_heads=self.arch.n_kv_heads,
                 norm_type=self.arch.norm_type,
                 attention_type=self.arch.attention_type,
+                attention_op=self.arch.attention_op,
                 mlp_type=self.arch.mlp_type,
                 activation=self.arch.activation,
                 mlp_ratio=self.arch.mlp_ratio,

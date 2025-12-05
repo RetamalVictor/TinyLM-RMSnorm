@@ -198,6 +198,7 @@ class TestFlashAttentionOp:
         assert out.shape == (B, H, T, D)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Memory-efficient attention requires CUDA")
 class TestMemoryEfficientAttentionOp:
     """Tests for MemoryEfficientAttentionOp."""
 
@@ -205,9 +206,9 @@ class TestMemoryEfficientAttentionOp:
         """Test basic forward pass."""
         op = MemoryEfficientAttentionOp()
         B, H, T, D = 2, 4, 8, 16
-        q = torch.randn(B, H, T, D)
-        k = torch.randn(B, H, T, D)
-        v = torch.randn(B, H, T, D)
+        q = torch.randn(B, H, T, D, device="cuda")
+        k = torch.randn(B, H, T, D, device="cuda")
+        v = torch.randn(B, H, T, D, device="cuda")
 
         out = op(q, k, v)
 
@@ -235,6 +236,7 @@ class TestAttentionOpEquivalence:
         # Should be close (exact match depends on kernel)
         assert torch.allclose(out_standard, out_flash, atol=1e-4)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Memory-efficient attention requires CUDA")
     def test_standard_vs_memory_efficient_equivalence(self):
         """Test that standard and memory_efficient produce same results."""
         standard_op = StandardAttentionOp()
@@ -242,9 +244,9 @@ class TestAttentionOpEquivalence:
 
         B, H, T, D = 2, 4, 8, 16
         torch.manual_seed(42)
-        q = torch.randn(B, H, T, D)
-        k = torch.randn(B, H, T, D)
-        v = torch.randn(B, H, T, D)
+        q = torch.randn(B, H, T, D, device="cuda")
+        k = torch.randn(B, H, T, D, device="cuda")
+        v = torch.randn(B, H, T, D, device="cuda")
 
         out_standard = standard_op(q, k, v, is_causal=True)
         out_mem = mem_op(q, k, v, is_causal=True)
@@ -278,7 +280,7 @@ class TestMHAWithAttentionOp:
         assert isinstance(mha.attention_op, MemoryEfficientAttentionOp)
 
     def test_mha_forward_with_different_ops(self):
-        """Test MHA forward works with all attention ops."""
+        """Test MHA forward works with CPU-compatible attention ops."""
         from tinylm.components.attention import MHA
         from tinylm.components.positional import RoPE
         from tinylm.components.positional.base import PositionalContext
@@ -287,7 +289,8 @@ class TestMHAWithAttentionOp:
         n_heads = 4
         head_dim = D // n_heads
 
-        for op_type in ["standard", "flash", "memory_efficient"]:
+        # Only test ops that work on CPU (standard, flash with fallback)
+        for op_type in ["standard", "flash"]:
             mha = MHA(dim=D, n_heads=n_heads, attention_op=op_type)
 
             # Setup positional embedding
@@ -308,6 +311,39 @@ class TestMHAWithAttentionOp:
 
             assert out.shape == (B, T, D)
             assert not torch.isnan(out).any()
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="Memory-efficient attention requires CUDA")
+    def test_mha_forward_with_memory_efficient(self):
+        """Test MHA forward works with memory_efficient attention on CUDA."""
+        from tinylm.components.attention import MHA
+        from tinylm.components.positional import RoPE
+        from tinylm.components.positional.base import PositionalContext
+
+        B, T, D = 2, 8, 64
+        n_heads = 4
+        head_dim = D // n_heads
+        device = torch.device("cuda")
+
+        mha = MHA(dim=D, n_heads=n_heads, attention_op="memory_efficient").to(device)
+
+        # Setup positional embedding
+        rope = RoPE(dim=head_dim, max_seq_len=32)
+        cache = rope.precompute(32, device)
+        mha.set_pos_emb(rope)
+
+        pos_ctx = PositionalContext(
+            seq_len=T,
+            start_pos=0,
+            sin=cache["sin"],
+            cos=cache["cos"],
+            device=device,
+        )
+
+        x = torch.randn(B, T, D, device=device)
+        out = mha(x, pos_ctx)
+
+        assert out.shape == (B, T, D)
+        assert not torch.isnan(out).any()
 
     def test_mha_swap_attention_op_runtime(self):
         """Test swapping attention op at runtime."""
@@ -375,17 +411,19 @@ class TestCUDAAttentionOps:
         assert out.shape == (B, H, T, D)
 
     def test_flash_on_cuda(self):
-        """Test flash attention on CUDA."""
+        """Test flash attention on CUDA (requires FP16/BF16)."""
         op = FlashAttentionOp()
         B, H, T, D = 2, 4, 8, 16
-        q = torch.randn(B, H, T, D, device="cuda")
-        k = torch.randn(B, H, T, D, device="cuda")
-        v = torch.randn(B, H, T, D, device="cuda")
+        # Flash Attention requires FP16 or BF16
+        q = torch.randn(B, H, T, D, device="cuda", dtype=torch.float16)
+        k = torch.randn(B, H, T, D, device="cuda", dtype=torch.float16)
+        v = torch.randn(B, H, T, D, device="cuda", dtype=torch.float16)
 
         out = op(q, k, v)
 
         assert out.device.type == "cuda"
         assert out.shape == (B, H, T, D)
+        assert out.dtype == torch.float16
 
     def test_memory_efficient_on_cuda(self):
         """Test memory_efficient attention on CUDA."""

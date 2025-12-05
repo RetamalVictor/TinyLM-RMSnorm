@@ -26,6 +26,7 @@ class ArchitectureConfig:
 
     # Attention
     attention_type: Literal["mha", "mqa", "gqa"] = "mha"
+    attention_op: Literal["standard", "flash", "memory_efficient"] = "standard"
     n_kv_heads: Optional[int] = None  # For MQA/GQA
 
     # Activation
