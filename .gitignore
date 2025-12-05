@@ -93,6 +93,7 @@ $RECYCLE.BIN/
 outputs/
 out/
 tokenizer.json
+tokenizers/
 
 # Model registry data (infra code is tracked, data is not)
 models/
