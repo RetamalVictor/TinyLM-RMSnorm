@@ -14,8 +14,15 @@ if TYPE_CHECKING:
 
 
 @ATTENTION_REGISTRY.register("mha")
+@ATTENTION_REGISTRY.register("gqa")
+@ATTENTION_REGISTRY.register("mqa")
 class MHA(nn.Module):
-    """Multi-Head Attention with positional embedding and KV-cache support.
+    """Multi-Head Attention with MQA/GQA support and KV-cache.
+
+    Supports three attention variants via n_kv_heads:
+    - MHA (Multi-Head Attention): n_kv_heads == n_heads (default)
+    - GQA (Grouped-Query Attention): 1 < n_kv_heads < n_heads
+    - MQA (Multi-Query Attention): n_kv_heads == 1
 
     Supports different positional embedding types via PositionalContext:
     - RoPE: applies rotation to Q and K
@@ -44,13 +51,26 @@ class MHA(nn.Module):
 
         self.dim = dim
         self.n_heads = n_heads
-        self.n_kv_heads = n_kv_heads or n_heads  # For MQA/GQA support later
+        self.n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self.head_dim = dim // n_heads
         self._dropout_p = dropout
 
-        # Projections
-        self.qkv = make_linear(
-            dim, dim * 3, bias=bias,
+        # Validate GQA configuration
+        assert n_heads % self.n_kv_heads == 0, (
+            f"n_heads ({n_heads}) must be divisible by n_kv_heads ({self.n_kv_heads})"
+        )
+        self.n_rep = n_heads // self.n_kv_heads  # How many times to repeat KV heads
+
+        # Projections: Q gets full heads, KV gets n_kv_heads
+        q_dim = self.n_heads * self.head_dim
+        kv_dim = self.n_kv_heads * self.head_dim
+
+        self.q_proj = make_linear(
+            dim, q_dim, bias=bias,
+            quant_config=quant_config, layer_type="attention"
+        )
+        self.kv_proj = make_linear(
+            dim, kv_dim * 2, bias=bias,  # K and V concatenated
             quant_config=quant_config, layer_type="attention"
         )
         self.proj = make_linear(
@@ -73,6 +93,25 @@ class MHA(nn.Module):
     def set_pos_emb(self, pos_emb: nn.Module):
         """Set positional embedding module for Q/K modification."""
         self.pos_emb = pos_emb
+
+    def _repeat_kv(self, x: torch.Tensor) -> torch.Tensor:
+        """Repeat KV heads to match query heads for GQA/MQA.
+
+        Args:
+            x: Tensor [B, n_kv_heads, T, head_dim]
+
+        Returns:
+            Tensor [B, n_heads, T, head_dim]
+        """
+        if self.n_rep == 1:
+            return x
+        B, H, T, D = x.shape
+        # Expand and reshape: [B, H, T, D] -> [B, H, 1, T, D] -> [B, H, n_rep, T, D] -> [B, H*n_rep, T, D]
+        return (
+            x[:, :, None, :, :]
+            .expand(B, H, self.n_rep, T, D)
+            .reshape(B, H * self.n_rep, T, D)
+        )
 
     def forward(
         self,
@@ -98,14 +137,15 @@ class MHA(nn.Module):
         """
         B, T, C = x.shape
 
-        # Compute Q, K, V
-        qkv = self.qkv(x)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        # Reshape to [B, H, T, D]
+        # Compute Q with full heads
+        q = self.q_proj(x)
         q = q.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        k = k.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
-        v = v.view(B, T, self.n_heads, self.head_dim).transpose(1, 2)
+
+        # Compute K, V with n_kv_heads (fewer heads for GQA/MQA)
+        kv = self.kv_proj(x)
+        k, v = kv.chunk(2, dim=-1)
+        k = k.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.n_kv_heads, self.head_dim).transpose(1, 2)
 
         # Apply positional embeddings to Q and K (for RoPE)
         pos_emb_module = pos_emb or self.pos_emb
@@ -122,9 +162,14 @@ class MHA(nn.Module):
             k = pos_emb_module.apply(k, ctx)
 
         # KV cache handling via CacheManager
+        # Note: We cache the unexpanded KV (n_kv_heads) to save memory
         if cache is not None:
             cache.update(layer_idx, k, v, start_pos)
             k, v = cache.get(layer_idx, start_pos + T)
+
+        # Expand KV heads to match Q heads for attention computation
+        k = self._repeat_kv(k)
+        v = self._repeat_kv(v)
 
         # Get attention bias if applicable (for ALiBi)
         attn_bias = None

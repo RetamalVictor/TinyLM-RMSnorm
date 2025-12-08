@@ -40,12 +40,12 @@ dev = [
 ]
 
 [project.scripts]
-tinylm-train = "train:main"
-tinylm-infer = "infer:main"
+tinylm-train = "tinylm.cli.train:main"
+tinylm-infer = "tinylm.cli.infer:main"
+tinylm-eval = "tinylm.cli.evaluate:main"
 
 [tool.setuptools]
-packages = ["tinylm", "tinylm.model", "tinylm.inference", "tinylm.quant", "tinylm._ext", "tinylm.training"]
-py-modules = ["train", "infer"]
+packages = ["tinylm", "tinylm.model", "tinylm.inference", "tinylm.quant", "tinylm._ext", "tinylm.training", "tinylm.cli", "tinylm.architectures", "tinylm.components", "tinylm.evaluation", "tinylm.kernels", "tinylm.registry"]
 include-package-data = true
 
 [tool.setuptools.package-data]

@@ -492,7 +492,7 @@ class TestWithRealData:
         """Smoke test: run training for a few steps."""
         result = subprocess.run(
             [
-                "uv", "run", "python", "train.py",
+                "uv", "run", "python", "-m", "tinylm.cli.train",
                 "model=tiny",
                 "training=quick_test",
                 "training.steps=10",

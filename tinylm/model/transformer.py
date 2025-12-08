@@ -58,6 +58,7 @@ class TinyLM(nn.Module):
         self.dim = dim
         self.n_layers = n_layers
         self.n_heads = n_heads
+        self.n_kv_heads = self.arch.n_kv_heads if self.arch.n_kv_heads is not None else n_heads
         self.max_seq_len = max_seq_len
         self.dropout_rate = dropout
         self.quant_config = quant_config
@@ -223,6 +224,7 @@ class TinyLM(nn.Module):
             n_layers=self.n_layers,
             n_heads=self.n_heads,
             head_dim=self.head_dim,
+            n_kv_heads=self.n_kv_heads,
             device=device,
             dtype=dtype,
         )

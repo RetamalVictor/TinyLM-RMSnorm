@@ -1,9 +1,9 @@
 services:
-  tinyml:
+  tinylm:
     build:
-      context: ..
-      dockerfile: TinyLM-RMSnorm/Dockerfile
-    image: tinyml:dev
+      context: .
+      dockerfile: Dockerfile
+    image: tinylm:dev
     shm_size: "8g"
     environment:
       HF_HOME: "/workspace/.cache/huggingface"
@@ -18,13 +18,10 @@ services:
               count: all
               capabilities: [gpu]
     volumes:
-      - .:/workspace/app
-      - ../bittorch:/workspace/bittorch
+      - ..:/workspace/app
       - hf-cache:/workspace/.cache/huggingface
-      - ./out:/workspace/app/out
-      - ./data:/workspace/app/data
     working_dir: /workspace/app
-    command: bash -lc "sleep infinity"
+    command: bash -c "sleep infinity"
 
 volumes:
   hf-cache:

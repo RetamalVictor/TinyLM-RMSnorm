@@ -161,7 +161,8 @@ class TestMHAWithQuant:
         mha = MHA(dim=64, n_heads=4, quant_config=cfg)
 
         # Verify layers are TernaryLinear
-        assert isinstance(mha.qkv, TernaryLinear)
+        assert isinstance(mha.q_proj, TernaryLinear)
+        assert isinstance(mha.kv_proj, TernaryLinear)
         assert isinstance(mha.proj, TernaryLinear)
 
         x = torch.randn(2, 8, 64)
@@ -196,7 +197,8 @@ class TestBlockWithQuant:
         )
 
         # Verify attention layers are TernaryLinear
-        assert isinstance(block.attn.qkv, TernaryLinear)
+        assert isinstance(block.attn.q_proj, TernaryLinear)
+        assert isinstance(block.attn.kv_proj, TernaryLinear)
         assert isinstance(block.attn.proj, TernaryLinear)
 
         x = torch.randn(2, 8, 64)
@@ -232,7 +234,8 @@ class TestTinyLMWithQuant:
         assert isinstance(model.head, nn.Linear)
 
         # Verify attention layers are quantized
-        assert isinstance(model.blocks[0].attn.qkv, TernaryLinear)
+        assert isinstance(model.blocks[0].attn.q_proj, TernaryLinear)
+        assert isinstance(model.blocks[0].attn.kv_proj, TernaryLinear)
 
         idx = torch.randint(0, 100, (2, 8))
         logits = model(idx)
@@ -268,7 +271,8 @@ class TestGradientFlow:
 
         # Check gradients exist
         assert x.grad is not None
-        assert mha.qkv.weight.grad is not None
+        assert mha.q_proj.weight.grad is not None
+        assert mha.kv_proj.weight.grad is not None
         assert mha.proj.weight.grad is not None
 
     def test_gradient_flow_model(self):
@@ -285,7 +289,8 @@ class TestGradientFlow:
 
         # Check gradients exist for key layers
         assert model.tok.weight.grad is not None
-        assert model.blocks[0].attn.qkv.weight.grad is not None
+        assert model.blocks[0].attn.q_proj.weight.grad is not None
+        assert model.blocks[0].attn.kv_proj.weight.grad is not None
         assert model.head.weight.grad is not None
 
 

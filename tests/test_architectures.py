@@ -354,5 +354,156 @@ class TestInference:
         assert callable(generate)
 
 
+class TestGQAMQA:
+    """Tests for Grouped-Query Attention (GQA) and Multi-Query Attention (MQA)."""
+
+    def test_mha_n_kv_heads_equals_n_heads(self):
+        """Standard MHA: n_kv_heads == n_heads."""
+        from tinylm.components.attention import MHA
+
+        mha = MHA(dim=128, n_heads=8, n_kv_heads=8)
+        assert mha.n_kv_heads == 8
+        assert mha.n_rep == 1  # No repetition needed
+
+        x = torch.randn(2, 16, 128)
+        pos_ctx = PositionalContext(seq_len=16, start_pos=0, device=x.device)
+        out = mha(x, pos_ctx)
+        assert out.shape == (2, 16, 128)
+
+    def test_gqa_n_kv_heads_less_than_n_heads(self):
+        """GQA: n_kv_heads < n_heads (grouped)."""
+        from tinylm.components.attention import MHA
+
+        mha = MHA(dim=128, n_heads=8, n_kv_heads=2)
+        assert mha.n_kv_heads == 2
+        assert mha.n_rep == 4  # Each KV head serves 4 Q heads
+
+        x = torch.randn(2, 16, 128)
+        pos_ctx = PositionalContext(seq_len=16, start_pos=0, device=x.device)
+        out = mha(x, pos_ctx)
+        assert out.shape == (2, 16, 128)
+
+    def test_mqa_n_kv_heads_equals_one(self):
+        """MQA: n_kv_heads == 1 (single KV head for all Q heads)."""
+        from tinylm.components.attention import MHA
+
+        mha = MHA(dim=128, n_heads=8, n_kv_heads=1)
+        assert mha.n_kv_heads == 1
+        assert mha.n_rep == 8  # Single KV head serves all 8 Q heads
+
+        x = torch.randn(2, 16, 128)
+        pos_ctx = PositionalContext(seq_len=16, start_pos=0, device=x.device)
+        out = mha(x, pos_ctx)
+        assert out.shape == (2, 16, 128)
+
+    def test_gqa_projection_sizes(self):
+        """Verify GQA uses smaller KV projections."""
+        from tinylm.components.attention import MHA
+
+        mha_full = MHA(dim=128, n_heads=8, n_kv_heads=8)
+        mha_gqa = MHA(dim=128, n_heads=8, n_kv_heads=2)
+
+        # Q projection same size
+        assert mha_full.q_proj.weight.shape == mha_gqa.q_proj.weight.shape
+
+        # KV projection smaller for GQA (2 heads vs 8 heads)
+        # kv_proj is [2 * n_kv_heads * head_dim, dim]
+        assert mha_full.kv_proj.weight.shape[0] == 2 * 8 * 16  # 256
+        assert mha_gqa.kv_proj.weight.shape[0] == 2 * 2 * 16   # 64
+
+    def test_gqa_model_forward(self):
+        """Test TinyLM with GQA architecture."""
+        cfg = ArchitectureConfig(
+            name="gqa_test",
+            attention_type="gqa",
+            n_kv_heads=2,  # 2 KV heads for 4 Q heads
+        )
+        model = TinyLM(
+            vocab_size=1000, dim=128, n_layers=2, n_heads=4,
+            arch_config=cfg
+        )
+        assert model.n_kv_heads == 2
+
+        x = torch.randint(0, 1000, (2, 32))
+        out = model(x)
+        assert out.shape == (2, 32, 1000)
+
+    def test_mqa_model_forward(self):
+        """Test TinyLM with MQA architecture."""
+        cfg = ArchitectureConfig(
+            name="mqa_test",
+            attention_type="mqa",
+            n_kv_heads=1,  # Single KV head
+        )
+        model = TinyLM(
+            vocab_size=1000, dim=128, n_layers=2, n_heads=4,
+            arch_config=cfg
+        )
+        assert model.n_kv_heads == 1
+
+        x = torch.randint(0, 1000, (2, 32))
+        out = model(x)
+        assert out.shape == (2, 32, 1000)
+
+    def test_gqa_with_kv_cache(self):
+        """Test GQA with KV cache for generation."""
+        cfg = ArchitectureConfig(
+            name="gqa_cache_test",
+            attention_type="gqa",
+            n_kv_heads=2,
+        )
+        model = TinyLM(
+            vocab_size=1000, dim=128, n_layers=2, n_heads=4,
+            arch_config=cfg
+        )
+        cache = model.create_kv_cache(batch_size=2, max_seq_len=64)
+
+        # Verify cache uses n_kv_heads (memory savings)
+        assert cache._n_kv_heads == 2
+
+        # Prefill
+        x1 = torch.randint(0, 1000, (2, 16))
+        out1 = model(x1, cache=cache, start_pos=0)
+        assert out1.shape == (2, 16, 1000)
+
+        # Generate
+        x2 = torch.randint(0, 1000, (2, 1))
+        out2 = model(x2, cache=cache, start_pos=16)
+        assert out2.shape == (2, 1, 1000)
+
+    def test_gqa_gradient_flow(self):
+        """Test gradients flow through GQA."""
+        from tinylm.components.attention import MHA
+
+        mha = MHA(dim=128, n_heads=8, n_kv_heads=2)
+        x = torch.randn(2, 16, 128, requires_grad=True)
+        pos_ctx = PositionalContext(seq_len=16, start_pos=0, device=x.device)
+
+        out = mha(x, pos_ctx)
+        loss = out.sum()
+        loss.backward()
+
+        assert x.grad is not None
+        assert mha.q_proj.weight.grad is not None
+        assert mha.kv_proj.weight.grad is not None
+        assert mha.proj.weight.grad is not None
+
+    def test_gqa_param_count_reduction(self):
+        """Verify GQA reduces parameter count."""
+        from tinylm.components.attention import MHA
+
+        mha_full = MHA(dim=256, n_heads=8, n_kv_heads=8)
+        mha_gqa = MHA(dim=256, n_heads=8, n_kv_heads=2)
+        mha_mqa = MHA(dim=256, n_heads=8, n_kv_heads=1)
+
+        params_full = sum(p.numel() for p in mha_full.parameters())
+        params_gqa = sum(p.numel() for p in mha_gqa.parameters())
+        params_mqa = sum(p.numel() for p in mha_mqa.parameters())
+
+        # GQA and MQA should have fewer parameters
+        assert params_gqa < params_full
+        assert params_mqa < params_gqa
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

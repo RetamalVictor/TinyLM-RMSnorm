@@ -91,6 +91,8 @@ class StandardCache(CacheManager):
     Replicates the original TinyLM caching behavior:
     - Pre-allocates full [B, H, max_seq, D] tensors per layer
     - O(1) update and retrieval via slicing
+
+    For GQA/MQA, use n_kv_heads < n_heads to save memory.
     """
 
     def __init__(
@@ -98,6 +100,7 @@ class StandardCache(CacheManager):
         n_layers: int,
         n_heads: int,
         head_dim: int,
+        n_kv_heads: Optional[int] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ):
@@ -105,13 +108,15 @@ class StandardCache(CacheManager):
 
         Args:
             n_layers: Number of transformer layers
-            n_heads: Number of attention heads
+            n_heads: Number of query attention heads
             head_dim: Dimension per attention head
+            n_kv_heads: Number of KV heads (for GQA/MQA, defaults to n_heads)
             device: Device for cache tensors (default: cpu)
             dtype: Data type for cache tensors (default: float32)
         """
         self._n_layers = n_layers
         self._n_heads = n_heads
+        self._n_kv_heads = n_kv_heads if n_kv_heads is not None else n_heads
         self._head_dim = head_dim
         self._device = device or torch.device('cpu')
         self._dtype = dtype or torch.float32
@@ -129,12 +134,13 @@ class StandardCache(CacheManager):
         self._max_seq_len = max_seq_len
 
         for _ in range(self._n_layers):
+            # Use n_kv_heads for cache allocation (saves memory for GQA/MQA)
             k = torch.zeros(
-                batch_size, self._n_heads, max_seq_len, self._head_dim,
+                batch_size, self._n_kv_heads, max_seq_len, self._head_dim,
                 device=self._device, dtype=self._dtype
             )
             v = torch.zeros(
-                batch_size, self._n_heads, max_seq_len, self._head_dim,
+                batch_size, self._n_kv_heads, max_seq_len, self._head_dim,
                 device=self._device, dtype=self._dtype
             )
             self._caches.append({'k': k, 'v': v})
