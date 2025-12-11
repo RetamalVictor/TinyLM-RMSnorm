@@ -53,14 +53,12 @@ include-package-data = true
 
 [dependency-groups]
 dev = [
-    "bittorch",
     "pytest",
     "ruff",
 ]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu121" }
-bittorch = { path = "../bittorch", editable = true }
 
 [[tool.uv.index]]
 name = "pytorch-cu121"
