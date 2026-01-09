@@ -1,14 +1,13 @@
 # TinyLM Lab
 
-Multi-architecture language model framework for research. Build tiny versions of LLaMA, GPT, and other architectures.
+A minimal transformer framework for research prototyping. ~6,800 lines of Python.
 
 ## Features
 
-- **Multi-Architecture**: LLaMA (RMSNorm, RoPE, SwiGLU) and GPT (LayerNorm, learned pos, GELU)
-- **Component System**: Modular building blocks with registry pattern
-- **Clean API**: Model handles positional embeddings internally
-- **KV Cache**: Efficient autoregressive generation
-- **Hydra Config**: Flexible configuration management
+- **Architectures**: LLaMA (RMSNorm, RoPE, SwiGLU) and GPT (LayerNorm, learned pos, GELU)
+- **Attention**: MHA, GQA, MQA with KV cache
+- **Quantization**: Ternary weights via BitTorch
+- **Export**: Browser deployment (SafeTensors + WebGPU)
 
 ## Setup
 
@@ -17,26 +16,20 @@ uv sync
 uv run python setup.py build_ext --inplace  # Optional: CUDA RMSNorm
 ```
 
-## Architectures
-
-| Feature | LLaMA | GPT |
-|---------|-------|-----|
-| Normalization | RMSNorm (pre) | LayerNorm (post) |
-| Positional | RoPE | Learned |
-| MLP | Gated (SwiGLU) | Standard |
-| Activation | SiLU | GELU |
-| Bias | No | Yes |
+## Quick Start
 
 ```python
 from tinylm import TinyLM
 
-# LLaMA-style model
-model = TinyLM(vocab_size=32000, dim=512, n_layers=8, n_heads=8, architecture="llama")
+model = TinyLM(
+    vocab_size=32000,
+    dim=512,
+    n_layers=8,
+    n_heads=8,
+    architecture="llama",
+)
 
-# GPT-style model
-model = TinyLM(vocab_size=32000, dim=512, n_layers=8, n_heads=8, architecture="gpt")
-
-# Forward pass (clean API - no sin/cos needed)
+# Forward pass
 logits = model(tokens)
 
 # Generation with KV cache
@@ -48,73 +41,43 @@ logits = model(tokens, cache=cache, start_pos=0)
 
 ```bash
 # Prepare data
-uv run python scripts/prepare_tinyshakespeare.py
 uv run python scripts/prepare_tinystories.py
 
-# Train LLaMA-style (default)
-uv run python train.py model=small
+# Train
+uv run python -m tinylm.cli.train model=small
+uv run python -m tinylm.cli.train model=small model.architecture=gpt
 
-# Train GPT-style
-uv run python train.py model=small model.architecture=gpt
-
-# Train with options
-uv run python train.py model=medium model.architecture=llama data=tinystories training=long
-
-# Fine-tune from checkpoint
-uv run python train.py finetune=full finetune.checkpoint_path=outputs/.../best.pt
-
-# Resume interrupted training
-uv run python train.py resume.enabled=true resume.checkpoint_path=outputs/.../best.pt
+# With ternary quantization
+uv run python -m tinylm.cli.train model=small quant=ternary
 ```
 
 ## Inference
 
 ```bash
-uv run python infer.py --ckpt outputs/.../best.pt --prompt "Once upon a time"
-uv run python infer.py --ckpt outputs/.../best.pt --prompt "The king" --temperature 0.8
+uv run python -m tinylm.cli.infer --ckpt outputs/.../best.pt --prompt "Once upon a time"
 ```
 
-## Monitor
+```python
+from tinylm.inference import load_checkpoint, generate
 
-```bash
-uv run tensorboard --logdir=outputs
+loaded = load_checkpoint("outputs/.../best.pt")
+text = generate(loaded.model, loaded.tokenizer, "The robot said", max_new_tokens=50)
+print(text)
 ```
 
 ## Configuration
 
-| Group | Options |
-|-------|---------|
+| Option | Values |
+|--------|--------|
 | `model` | `tiny`, `small`, `medium`, `large` |
 | `model.architecture` | `llama`, `gpt` |
-| `data` | `tinyshakespeare`, `tinystories`, `combined` |
-| `training` | `default`, `long`, `quick_test` |
-| `tokenizer` | `bytelevel` (default), `whitespace` |
-| `finetune` | `full`, `freeze_early`, `freeze_embeddings` |
+| `data` | `tinyshakespeare`, `tinystories`, `wikitext` |
 | `quant` | `none`, `ternary` |
-
-## Project Structure
-
-```
-tinylm/
-├── architectures/     # Architecture configs (llama, gpt)
-├── components/        # Building blocks
-│   ├── normalization/ # RMSNorm (with CUDA kernel), LayerNorm
-│   ├── positional/    # RoPE, Learned
-│   ├── attention/     # MHA
-│   ├── mlp/           # Standard, Gated (SwiGLU)
-│   └── activations.py # SiLU, GELU, ReLU
-├── model/
-│   ├── transformer.py # TinyLM main class
-│   └── blocks.py      # PreNorm, PostNorm blocks
-├── inference/         # Generation utilities, KV cache
-├── training/          # Training utilities
-└── quant/             # Ternary quantization (BitTorch)
-```
 
 ## Tests
 
 ```bash
-uv run pytest tests/test_architectures.py -v
+uv run pytest tests/ -v
 ```
 
 ## License
